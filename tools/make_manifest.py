@@ -12,15 +12,22 @@ hashes atualizados. Nao inventa nem remove campos — so atualiza "sha256" dos
 itens ja descritos no manifest, preservando todo o resto (schema,
 biblioteca_version, min_sketchup, ids, roots, remove[], fonts: null etc).
 
+NAO bumpa versao nenhuma: 'biblioteca_version' e 'plugins[].version' sao
+manuais. O que ele faz e CONFERIR, com erro fatal: 'roots' contra as entradas
+de topo do zip e 'plugins[].version' contra a constante VERSION assada dentro
+do .rbz. 'biblioteca_version' contra a tag e conferido no CI (release.yml,
+step "gate de versao"), que e onde a tag existe.
+
 Usado em CI (.github/workflows/release.yml, job de release) e manutencao
 manual: trocar o payload -> rodar este script -> commit -> tag.
 
-Stdlib puro (pathlib, hashlib, json) — sem dependencias externas.
+Stdlib puro (pathlib, hashlib, json, zipfile, re) — sem dependencias externas.
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
 import zipfile
 from pathlib import Path
@@ -31,6 +38,9 @@ PAYLOAD_DIR = REPO_ROOT / "payload"
 
 # leitura em blocos p/ nao carregar arquivos grandes inteiros na memoria
 _CHUNK_SIZE = 1024 * 1024
+
+# VERSION = '1.0.0' no loader raiz do .rbz (cura_ferramentas.rb)
+_VERSION_RE = re.compile(rb"^\s*VERSION\s*=\s*'([^']+)'", re.MULTILINE)
 
 
 def sha256_of(path: Path) -> str:
@@ -83,6 +93,42 @@ def validate_roots(entry: dict, payload_path: Path, *, label: str) -> None:
         raise SystemExit(1)
 
 
+def validate_version(entry: dict, payload_path: Path, *, label: str) -> None:
+    """Confere que 'version' do manifest bate com a constante VERSION assada
+    dentro do .rbz (loader raiz, o unico .rb no topo do zip).
+
+    O banner de atualizacao in-plugin (core/updater.rb) compara
+    CURA::Tools::VERSION, que vem do .rbz, com plugins[].version, que vem do
+    manifest — dois campos de repos diferentes, editados a mao em momentos
+    diferentes. Esquecer o bump do manifest = banner que nunca aparece;
+    bumpar so o manifest = banner permanente que reinstalar nunca limpa. Nos
+    dois casos o instalador continua funcionando, entao nada mais no pipeline
+    denuncia. Divergiu -> erro fatal, mesmo criterio de validate_roots.
+    """
+    declared = entry.get("version")
+    if not declared:
+        return
+
+    with zipfile.ZipFile(payload_path) as zf:
+        loaders = [n for n in zf.namelist() if n.endswith(".rb") and "/" not in n]
+        if len(loaders) != 1:
+            print(f"ERRO: esperava 1 loader .rb na raiz do zip de {label}, achei {sorted(loaders)}", file=sys.stderr)
+            raise SystemExit(1)
+        found = _VERSION_RE.search(zf.read(loaders[0]))
+
+    if not found:
+        print(f"ERRO: nao achei VERSION = '...' em {loaders[0]} dentro de {label}.", file=sys.stderr)
+        raise SystemExit(1)
+
+    real = found.group(1).decode("utf-8")
+    if real != declared:
+        print(f"ERRO: 'version' de {label} não bate com a VERSION dentro do zip.", file=sys.stderr)
+        print(f"  version do manifest: {declared}", file=sys.stderr)
+        print(f"  VERSION em {loaders[0]}: {real}", file=sys.stderr)
+        print("  bumpe os dois juntos (o banner de update do plugin compara esses dois).", file=sys.stderr)
+        raise SystemExit(1)
+
+
 def main() -> int:
     if not MANIFEST_PATH.is_file():
         print(f"ERRO: manifest nao encontrado em {MANIFEST_PATH}", file=sys.stderr)
@@ -98,6 +144,7 @@ def main() -> int:
         if result:
             changes.append(result)
             validate_roots(plugin, PAYLOAD_DIR / plugin["file"], label=label)
+            validate_version(plugin, PAYLOAD_DIR / plugin["file"], label=label)
 
     fonts = manifest.get("fonts")
     if fonts is not None:

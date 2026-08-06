@@ -1,32 +1,25 @@
 {
   "schema": 1,
-  "biblioteca_version": "9.1.1",
-  "min_sketchup": 2017,
+  "biblioteca_version": "9.2.0",
+  "min_sketchup": 2018,
   "plugins": [
     {
       "id": "cura-ferramentas",
       "name": "cura | ferramentas",
-      "version": "0.9.2",
+      "version": "1.0.0",
       "file": "cura-ferramentas.rbz",
       "url": null,
-      "sha256": "d26dd15eaad05e17c48a630180fad352a7192254349f952784480529f3eebc82",
+      "sha256": "7d7f72e558736315b19d43540d4ce88cf36a5c72aca5b6b21e80ebba29e56a32",
       "roots": [
         "cura_ferramentas",
         "cura_ferramentas.rb"
       ]
     }
   ],
-  "fonts": null,
-  "remove": [
-    "TT_Lib2",
-    "TT_Lib2.rb",
-    "TT_Lib²",
-    "tt_lib2.rb",
-    "TT_CleanUp",
-    "tt_cleanup",
-    "tt_cleanup.rb",
-    "TT_EdgeTools",
-    "tt_edgetools",
-    "tt_edgetools.rb"
-  ]
+  "fonts": {
+    "file": "fonts.zip",
+    "url": null,
+    "sha256": "c11dcaadd30ae0aa818f9bde6e1b3ecc12097af985736b87247d977d19a5fb79"
+  },
+  "remove": []
 }

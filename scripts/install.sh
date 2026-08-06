@@ -7,6 +7,7 @@
 # Uso:
 #   /bin/bash -c "$(curl -fsSL https://github.com/joaotegoni/cura-biblioteca/releases/latest/download/install.sh)"
 #   ./install.sh --uninstall
+#   ./install.sh --limpar
 #
 # Variaveis de ambiente:
 #   CURA_BASE_URL   override da URL/dir base dos assets (teste local). Aceita
@@ -26,20 +27,30 @@ DEFAULT_BASE_URL="https://github.com/joaotegoni/cura-biblioteca/releases/latest/
 BASE_URL="${CURA_BASE_URL:-$DEFAULT_BASE_URL}"
 BASE_URL="${BASE_URL%/}"
 
+# aviso de beta — some quando a biblioteca sair do beta (remover as 2 linhas e
+# os usos de $BETA_NOTE). Ver README, secao "beta".
+BETA_NOTE="esta é uma versão beta: seguimos testando e corrigindo. se algo falhar, mande o log pro suporte."
+
 APP_SUPPORT_DIR="$HOME/Library/Application Support"
 CURA_STATE_DIR="$APP_SUPPORT_DIR/CURA-Biblioteca"
 SNAPSHOT_PATH="$CURA_STATE_DIR/installed.json"
 LOG_PATH="$CURA_STATE_DIR/install.log"
 FONTS_DIR="$HOME/Library/Fonts"
 
+# porao de recuperacao: TUDO que sai de um Plugins/ por acao nossa (o "limpar
+# sketchup" e a lista "remove" do manifest) vai pra ca — nunca apaga, sempre da
+# pra arrastar de volta. carimbo com segundos: duas rodadas no mesmo minuto nao
+# colidem na mesma pasta.
+RECOVERY_BASE="$HOME/Documents/cura-plugins-removidos/$(date +%Y-%m-%d-%H%M%S)"
+
 # lock de concorrencia (launchagent de auto-update x execucao manual sobre o
 # mesmo installed.json/Plugins) — ver acquire_lock/release via cleanup().
 LOCK_DIR="$CURA_STATE_DIR/.lock"
 LOCK_HELD=0
 
-# launchagent de auto-update (registrado so em instalacao interativa — ver
-# register_updater). caminho fica sob $HOME, entao testes com HOME isolado nao
-# tocam o launchd real da maquina.
+# launchagent de auto-update. em quiet o plist e reescrito so quando muda e o
+# launchctl nunca e chamado — ver register_updater. caminho fica sob $HOME,
+# entao testes com HOME isolado nao tocam o launchd real da maquina.
 LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 UPDATER_LABEL="com.cura.biblioteca.updater"
 UPDATER_PLIST="$LAUNCH_AGENTS_DIR/$UPDATER_LABEL.plist"
@@ -50,10 +61,20 @@ UPDATER_PLIST="$LAUNCH_AGENTS_DIR/$UPDATER_LABEL.plist"
 # depender de posicao.
 UNINSTALL=0
 QUIET=0
+LIMPAR=0
 for _arg in "${1:-}" "${2:-}"; do
   case "$_arg" in
     --uninstall) UNINSTALL=1 ;;
     --quiet) QUIET=1 ;;
+    --limpar) LIMPAR=1 ;;
+    "") ;;
+    # sem esse ramo, um typo ("--Limpar", "--unistall", "--help") caia direto
+    # na instalacao completa em silencio — o oposto do que o aluno pediu. err()
+    # e as cores ainda nao existem aqui, entao a mensagem vai crua no stderr.
+    *)
+      printf '%s\n' "opção desconhecida: $_arg. use --uninstall ou --limpar." >&2
+      exit 2
+      ;;
   esac
 done
 
@@ -138,7 +159,7 @@ banner() {
     return 0
   fi
   printf '\n'
-  printf '  %s%s{ cura }%s  biblioteca 9.0\n' "$C_BOLD" "$C_VERDE" "$C_RESET"
+  printf '  %s%s{ cura }%s  biblioteca\n' "$C_BOLD" "$C_VERDE" "$C_RESET"
   printf '  %sinstalador mac%s\n' "$C_BOLD" "$C_RESET"
   printf '  %s\n\n' "$SEPARADOR"
 }
@@ -243,7 +264,12 @@ fetch_asset() {
     fi
     cp "$src" "$dest"
   else
-    if ! curl -fsSL --retry 3 --connect-timeout 30 "$BASE_URL/$name" -o "$dest"; then
+    # --connect-timeout so limita o HANDSHAKE: sem --speed-limit/--speed-time o
+    # download que trava no meio (wi-fi ruim, proxy engasgado) pendura o
+    # instalador pra sempre, com a tela parada e sem nada pra ler. aborta se
+    # ficar 60s abaixo de 1 KB/s — teto por velocidade, nao por tempo total
+    # (o fonts.zip tem ~9 MB e um link lento porem saudavel nao pode estourar).
+    if ! curl -fsSL --retry 3 --connect-timeout 30 --speed-limit 1024 --speed-time 60 "$BASE_URL/$name" -o "$dest"; then
       err "falha ao baixar $name — sem internet ou GitHub inacessível. log: $LOG_PATH. verifique sua conexão e rode o instalador de novo."
       exit 2
     fi
@@ -263,7 +289,7 @@ fetch_absolute_url() {
     fi
     cp "$src" "$dest"
   else
-    if ! curl -fsSL --retry 3 --connect-timeout 30 "$url" -o "$dest"; then
+    if ! curl -fsSL --retry 3 --connect-timeout 30 --speed-limit 1024 --speed-time 60 "$url" -o "$dest"; then
       err "falha ao baixar $url — sem internet ou GitHub inacessível. log: $LOG_PATH. verifique sua conexão e rode o instalador de novo."
       exit 2
     fi
@@ -272,9 +298,13 @@ fetch_absolute_url() {
 
 # só nomes exatos (sem "/" nem "..") — nunca glob solto, nunca fora de
 # Plugins/Fonts/CURA-Biblioteca (regra de codigo obrigatoria do SPEC).
+# os nomes vindos do manifest sao expandidos SEM aspas (pra o IFS="," quebrar o
+# CSV de roots), o que tambem liga pathname expansion: um "*" no manifest viraria
+# glob contra o diretorio corrente logo antes de um rm -rf. barramos aqui.
 is_safe_leaf_name() {
   case "$1" in
     "" | */* | *..*) return 1 ;;
+    *[*?[]*) return 1 ;;
     *) return 0 ;;
   esac
 }
@@ -480,10 +510,17 @@ state == "top" && /^  "item_labels": \[\]/ { next }
 state == "top" && /^  "item_labels": \[/ { state = "labels"; next }
 state == "labels" && /^  \]/ { state = "top"; next }
 state == "labels" { print "LABEL" US arrval($0); next }
-state == "top" && /^  "item_paths": \[\]/ { next }
-state == "top" && /^  "item_paths": \[/ { state = "paths"; next }
+state == "top" && /^  "item_paths": \[\]/ { saw_paths = 1; next }
+state == "top" && /^  "item_paths": \[/ { saw_paths = 1; state = "paths"; next }
 state == "paths" && /^  \]/ { state = "top"; next }
 state == "paths" { print "PATH" US arrval($0); next }
+# sentinela de integridade: o awk casa por regex e sai 0 em arquivo truncado,
+# vazio ou lixo — sem isso o read_snapshot nao teria como distinguir "registro
+# vazio de verdade" de "arquivo cortado no meio". a regra do "}" fica DEPOIS
+# das regras de state de proposito: num arquivo cortado dentro do array a
+# linha e consumida com "next" la em cima e saw_close nunca e setado.
+/^\}/ { saw_close = 1 }
+END { if (saw_close && saw_paths && state == "top") print "SENTINEL" US "ok" }
 AWKEOF2
 
   cat > "$WRITE_SNAPSHOT_PY" <<'PYEOF2'
@@ -590,6 +627,18 @@ parse_manifest() {
   local manifest_path="$1"
   local tsv="$TMP_DIR/manifest.tsv"
 
+  # guarda barata antes de qualquer parser, protege os dois branches: resposta
+  # que nao comeca com "{" nao e o nosso manifest. e o caso do wi-fi com tela
+  # de login e do proxy corporativo, que devolvem HTML com HTTP 200 — o parser
+  # awk engoliria isso em silencio e sairia com TUDO vazio.
+  case "$(tr -d '[:space:]' < "$manifest_path" | cut -c1)" in
+    '{') ;;
+    *)
+      err "manifest.json inválido (a resposta não é JSON) — sua rede pode estar interceptando o download (wi-fi com tela de login, proxy). log: $LOG_PATH. conecte em outra rede e rode o instalador de novo."
+      exit 2
+      ;;
+  esac
+
   if [ -n "$PYTHON3_BIN" ]; then
     if ! "$PYTHON3_BIN" "$PARSE_MANIFEST_PY" "$manifest_path" > "$tsv" 2>"$TMP_DIR/parse_manifest.err"; then
       err "manifest.json inválido ou não foi possível interpretá-lo. log: $LOG_PATH."
@@ -597,7 +646,11 @@ parse_manifest() {
       exit 2
     fi
   else
-    awk -f "$PARSE_MANIFEST_AWK" "$manifest_path" > "$tsv"
+    if ! awk -f "$PARSE_MANIFEST_AWK" "$manifest_path" > "$tsv"; then
+      err "manifest.json inválido ou não foi possível interpretá-lo. log: $LOG_PATH."
+      log "detalhe (awk): parse_manifest.awk falhou"
+      exit 2
+    fi
   fi
 
   while IFS="$US" read -r rtype f1 f2 f3 f4 f5 f6 f7; do
@@ -626,6 +679,28 @@ parse_manifest() {
         ;;
     esac
   done < "$tsv"
+
+  # validacao pos-parse: o awk sai 0 mesmo sem casar UMA linha, entao um
+  # manifest fora do formato viraria "tudo vazio" sem ninguem reclamar — e
+  # vazio, mais adiante, significa "nenhum SketchUp compativel" (MIN_SKETCHUP
+  # vazio faz o teste de ano falhar pra toda versao) + "sem fontes", e o
+  # installed.json seria reescrito zerado, transformando o que esta no disco
+  # em orfao. melhor parar aqui.
+  if [ -z "$BIBLIOTECA_VERSION" ]; then
+    err "manifest.json inválido (sem biblioteca_version). log: $LOG_PATH. tente de novo mais tarde."
+    exit 2
+  fi
+  case "$MIN_SKETCHUP" in
+    [0-9][0-9][0-9][0-9]) ;;
+    *)
+      err "manifest.json inválido (min_sketchup='$MIN_SKETCHUP'). log: $LOG_PATH. tente de novo mais tarde."
+      exit 2
+      ;;
+  esac
+  if [ "${#PLUGIN_IDS[@]}" -eq 0 ] && [ -z "$FONTS_FILE" ]; then
+    err "manifest.json inválido (sem plugins e sem fontes). log: $LOG_PATH. tente de novo mais tarde."
+    exit 2
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -635,6 +710,18 @@ ITEM_LABELS=(); ITEM_PATHS=()
 
 write_snapshot() {
   local tsv="$TMP_DIR/snapshot_in.tsv"
+
+  # nada a registrar nesta rodada, mas o registro anterior tinha itens:
+  # preserva o installed.json antigo em vez de zerar. registro zerado
+  # transforma tudo que esta no disco em orfao — o --uninstall so olha o
+  # registro. de proposito NAO e erro: sob --quiet (launchagent, login +
+  # diaria) isso viraria falha barulhenta e recorrente, e existe caso legitimo
+  # de zero itens (sem SketchUp e manifest sem fontes).
+  if [ "${#ITEM_LABELS[@]}" -eq 0 ] && [ "${#SNAP_ITEM_PATHS[@]}" -gt 0 ]; then
+    log "aviso: nada a registrar nesta rodada; preservando installed.json anterior (${#SNAP_ITEM_PATHS[@]} itens)."
+    return 0
+  fi
+
   {
     printf 'SCALAR%sbiblioteca_version%s%s\n' "$US" "$US" "$BIBLIOTECA_VERSION"
     printf 'SCALAR%sinstalled_at%s%s\n' "$US" "$US" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -689,23 +776,50 @@ PYEOF3
     fi
   else
     awk -f "$PARSE_SNAPSHOT_AWK" "$SNAPSHOT_PATH" > "$tsv"
+    # o awk casa por regex e sai 0 em arquivo truncado, vazio ou lixo — sem
+    # esta checagem a branch awk NUNCA reportava corrupcao (ao contrario da
+    # branch python3), e o --uninstall tratava o registro cortado como
+    # "registro vazio" e apagava o installed.json que o comentario de la manda
+    # preservar pro suporte. a sentinela so sai quando o arquivo fecha com "}",
+    # a chave item_paths apareceu e nenhum array ficou aberto.
+    if ! grep -q '^SENTINEL' "$tsv"; then
+      log "aviso: installed.json corrompido/ilegível, tratando como sem registro. detalhe (awk): estrutura incompleta (arquivo truncado ou não é um installed.json)"
+      return 1
+    fi
   fi
 
   while IFS="$US" read -r rtype f1 f2; do
     case "$rtype" in
       SCALAR)
-        [ "$f1" = "biblioteca_version" ] && SNAP_BIBLIOTECA_VERSION="$f2"
+        # "if" e nao "[ ... ] && VAR=": com o && o status do teste vira o
+        # status do corpo do loop, e um SCALAR que nao e biblioteca_version na
+        # ULTIMA linha (installed_at, sempre) fazia o while — e a funcao —
+        # retornarem 1, ou seja: snapshot valido reportado como corrompido.
+        if [ "$f1" = "biblioteca_version" ]; then
+          SNAP_BIBLIOTECA_VERSION="$f2"
+        fi
         ;;
       LABEL) SNAP_ITEM_LABELS+=("$f1") ;;
       PATH) SNAP_ITEM_PATHS+=("$f1") ;;
     esac
   done < "$tsv"
+  return 0
 }
 
 # ---------------------------------------------------------------------------
 # Fluxo: aguarda SketchUp fechar (nao mata processo)
 # ---------------------------------------------------------------------------
 wait_sketchup_closed() {
+  # testa o terminal UMA vez, antes do loop. sem terminal de controle
+  # (execucao headless) seguir e defensavel; COM terminal, uma leitura que
+  # falha e ctrl+D do aluno — e seguir ai e exatamente o que esta funcao
+  # existe pra impedir (trocar arquivo embaixo do SketchUp rodando corrompe a
+  # sessao). o do_uninstall ja aborta nesse caso; aqui era o unico ponto que
+  # seguia mesmo assim.
+  local tem_tty=0
+  if (: < /dev/tty) 2>/dev/null; then
+    tem_tty=1
+  fi
   while pgrep -x "SketchUp" >/dev/null 2>&1; do
     printf '\nSketchUp está aberto. feche-o completamente antes de continuar.\n'
     printf 'pressione enter para verificar de novo (ou ctrl+c para cancelar): '
@@ -716,6 +830,9 @@ wait_sketchup_closed() {
     # revela isso. 2>/dev/null antes do "<" suprime o erro cru do bash.
     if read -r _ 2>/dev/null < /dev/tty; then
       :
+    elif [ "$tem_tty" = "1" ]; then
+      err "não deu pra confirmar que o SketchUp está fechado — nada foi alterado. log: $LOG_PATH. feche o SketchUp e rode o instalador de novo."
+      exit 2
     else
       log "aviso: /dev/tty indisponível — seguindo sem confirmar fechamento do SketchUp"
       break
@@ -726,17 +843,43 @@ wait_sketchup_closed() {
 # ---------------------------------------------------------------------------
 # Limpeza de um Plugins/ (lista remove + roots de instalacao anterior)
 # ---------------------------------------------------------------------------
+# move um item pro porao de recuperacao. retorna 1 (sem apagar nada) se nao
+# der — quem chama escreve a mensagem em portugues. 2>/dev/null no mv: erro cru
+# do mv na cara do aluno nao ajuda ninguem.
+move_to_recovery() {
+  local src="$1" dest_dir="$2"
+  local nome
+  nome="$(basename "$src")"
+  mkdir -p "$dest_dir" 2>/dev/null || return 1
+  # destino ja ocupado: nao sobrescreve nem mistura conteudo — pula e avisa.
+  if [ -e "$dest_dir/$nome" ]; then
+    return 1
+  fi
+  mv -- "$src" "$dest_dir/" 2>/dev/null || return 1
+  return 0
+}
+
 cleanup_plugins_dir() {
-  local plugins_dir="$1"
-  local name target
+  local plugins_dir="$1" year="$2"
+  local name target dest_dir
 
   if [ "${#REMOVE_NAMES[@]}" -gt 0 ]; then
     for name in "${REMOVE_NAMES[@]}"; do
       is_safe_leaf_name "$name" || continue
       target="$plugins_dir/$name"
       if [ -e "$target" ]; then
-        rm -rf -- "$target"
-        log "removido (lista remove): $target"
+        # a lista "remove" do manifest ja carregou plugin de TERCEIRO (o
+        # manifest 9.1.1 pedia TT_Lib2, que e dependencia de Solid Inspector2,
+        # Vertex Tools e QuadFace Tools). vale a mesma regra do "limpar
+        # sketchup": NUNCA apaga — move pro porao, da pra arrastar de volta.
+        # sem isso, uma edicao de manifest apaga plugin pago do aluno em
+        # silencio, disparada pelo launchagent em --quiet.
+        dest_dir="$RECOVERY_BASE/SketchUp $year"
+        if move_to_recovery "$target" "$dest_dir"; then
+          log "movido (lista remove): $target -> $dest_dir/"
+        else
+          log "aviso: não consegui mover (lista remove): $target — mantido no lugar"
+        fi
       fi
     done
   fi
@@ -766,14 +909,24 @@ cleanup_plugin_roots() {
 # ---------------------------------------------------------------------------
 # LaunchAgent de auto-update (dispara no login + reserva diaria)
 # ---------------------------------------------------------------------------
-register_updater() {
-  # nunca em quiet: o proprio updater roda em quiet e nao deve se re-registrar
-  # a cada disparo automatico. so instalacao interativa registra.
-  if [ "$QUIET" = "1" ]; then
-    return 0
-  fi
+# updater.out/updater.err crescem sem teto (uma execucao por login + uma por
+# dia, pra sempre). trunca em ~1 MB. trunca no MESMO arquivo em vez de
+# rotacionar: o launchd segura o descritor destes dois enquanto o job roda.
+rotate_updater_logs() {
+  local f size
+  for f in "$CURA_STATE_DIR/updater.out" "$CURA_STATE_DIR/updater.err"; do
+    [ -f "$f" ] || continue
+    size="$(stat -f %z "$f" 2>/dev/null || echo 0)"
+    case "$size" in '' | *[!0-9]*) size=0 ;; esac
+    if [ "$size" -gt 1048576 ]; then
+      printf '[%s] log truncado (passou de 1 MB)\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" > "$f"
+    fi
+  done
+}
 
+register_updater() {
   mkdir -p "$LAUNCH_AGENTS_DIR"
+  rotate_updater_logs
 
   # o updater SEMPRE puxa da release oficial: DEFAULT_BASE_URL literal, nunca
   # $BASE_URL (um teste local sobrescreve via CURA_BASE_URL). o pipeline
@@ -781,7 +934,8 @@ register_updater() {
   # do launchd em runtime — o auto-update sempre baixa a versao vigente. (forma
   # pipe, nao "$(curl ...)": bash -c avaliando "$(...)" literal trataria a 1a
   # palavra do script como comando, nao rodaria o script.)
-  cat > "$UPDATER_PLIST" <<PLISTEOF
+  local plist_tmp="$TMP_DIR/updater.plist"
+  cat > "$plist_tmp" <<PLISTEOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -806,6 +960,21 @@ register_updater() {
 </plist>
 PLISTEOF
 
+  # em quiet e o PROPRIO updater rodando: reescreve o plist so quando o
+  # conteudo mudou e NUNCA chama launchctl (o job nao pode dar unload em si
+  # mesmo — essa e a razao original do guard). o launchd pega a definicao nova
+  # no proximo login. sem isso o plist era write-once: quem instalasse hoje
+  # ficaria com esta URL/intervalo/Label pra sempre, sem caminho de migracao.
+  if [ "$QUIET" = "1" ]; then
+    if cmp -s "$plist_tmp" "$UPDATER_PLIST"; then
+      return 0
+    fi
+    mv -f "$plist_tmp" "$UPDATER_PLIST"
+    log "auto-update: plist atualizado (quiet — launchd recarrega no próximo login)"
+    return 0
+  fi
+
+  mv -f "$plist_tmp" "$UPDATER_PLIST"
   log "auto-update registrado (login + diária)"
 
   # em teste (CURA_BASE_URL setado) o plist ja foi escrito num HOME isolado; nao
@@ -883,7 +1052,7 @@ do_install() {
   fetch_asset "manifest.json" "$manifest_path"
   parse_manifest "$manifest_path"
 
-  local VERSION_YEARS=() VERSION_DIRS=()
+  local VERSION_YEARS=() VERSION_DIRS=() SKIPPED_YEARS=()
   local d base year plugins_dir
   for d in "$APP_SUPPORT_DIR"/"SketchUp 20"*; do
     [ -e "$d" ] || continue
@@ -899,6 +1068,12 @@ do_install() {
       mkdir -p "$plugins_dir"
       VERSION_YEARS+=("$year")
       VERSION_DIRS+=("$plugins_dir")
+    elif [ -d "$d/SketchUp/Plugins" ]; then
+      # SketchUp instalado, mas abaixo do minimo desta versao da biblioteca.
+      # guardamos pra conseguir DIZER isso ao aluno — sem essa lista o
+      # instalador nao distingue "nao tem SketchUp" de "tem, mas e antigo" e
+      # manda instalar o SketchUp pra quem ja tem.
+      SKIPPED_YEARS+=("$year")
     fi
   done
 
@@ -929,6 +1104,7 @@ do_install() {
             old_ifs_c="$IFS"
             IFS=','
             for root_name_c in ${PLUGIN_ROOTS_CSV[$pi_c]}; do
+              is_safe_leaf_name "$root_name_c" || continue
               [ -e "$plugins_dir_c/$root_name_c" ] || noop=0
             done
             IFS="$old_ifs_c"
@@ -941,6 +1117,12 @@ do_install() {
         if [ "$QUIET" != "1" ]; then
           say "biblioteca já está atualizada (v$BIBLIOTECA_VERSION). nada a fazer."
         fi
+        # self-cura (paridade com o install.ps1, que ja registra no ramo de
+        # no-op): o no-op e o estado NORMAL do dia a dia. sem esta chamada o
+        # plist do auto-update nunca mais era reescrito nem recarregado — plist
+        # removido ou desatualizado significava aluno fora do parque, em
+        # silencio. register_updater nao chama launchctl em quiet.
+        register_updater
         exit 0
       fi
     fi
@@ -949,7 +1131,17 @@ do_install() {
   local HAD_ERROR=0
 
   if [ "${#VERSION_YEARS[@]}" -eq 0 ]; then
-    say "SketchUp não encontrado — instalando só as fontes. instale o SketchUp e rode este instalador de novo."
+    # tres situacoes MUITO diferentes que antes recebiam o mesmo texto (e o
+    # texto errado em duas delas: "instale o SketchUp" pra quem ja tem).
+    # a deteccao varre "Application Support/SketchUp 20*", que o SketchUp so
+    # cria no PRIMEIRO lancamento — instalar o .app nao cria nada.
+    if [ "${#SKIPPED_YEARS[@]}" -gt 0 ]; then
+      say "seu SketchUp ${SKIPPED_YEARS[*]} não é compatível com esta versão da biblioteca (mínimo: SketchUp $MIN_SKETCHUP) — instalando só as fontes."
+    elif ls -d /Applications/SketchUp\ 20* >/dev/null 2>&1; then
+      say "o SketchUp está instalado mas nunca foi aberto — instalando só as fontes. abra o SketchUp uma vez, feche, e rode este instalador de novo (ou não faça nada: o instalador se atualiza sozinho e instala os plugins no próximo login)."
+    else
+      say "SketchUp não encontrado — instalando só as fontes. instale o SketchUp e rode este instalador de novo."
+    fi
   else
     # download + verificacao de cada plugin (1x, independente de quantas
     # versoes do SketchUp existam)
@@ -998,7 +1190,7 @@ do_install() {
     for vi in "${!VERSION_YEARS[@]}"; do
       year_v="${VERSION_YEARS[$vi]}"
       plugins_dir_v="${VERSION_DIRS[$vi]}"
-      cleanup_plugins_dir "$plugins_dir_v"
+      cleanup_plugins_dir "$plugins_dir_v" "$year_v"
 
       for pi in "${!PLUGIN_IDS[@]}"; do
         if [ "${PLUGIN_OK[$pi]}" = "1" ]; then
@@ -1009,6 +1201,9 @@ do_install() {
           local old_ifs="$IFS"
           IFS=','
           for root_name in ${PLUGIN_ROOTS_CSV[$pi]}; do
+            # mesma guarda do cleanup_plugin_roots: esta expansao e sem aspas
+            # (pro IFS quebrar o CSV) e portanto tambem faz glob.
+            is_safe_leaf_name "$root_name" || continue
             root_path="$plugins_dir_v/$root_name"
             if [ -e "$root_path" ]; then
               ITEM_LABELS+=("plugin ${PLUGIN_NAMES[$pi]} v${PLUGIN_VERSIONS[$pi]} (SketchUp $year_v)")
@@ -1049,6 +1244,77 @@ do_install() {
     log "fontes: manifest sem fontes (fonts: null), etapa pulada."
   fi
 
+  # reconciliacao com a rodada anterior. o installed.json e reconstruido do
+  # ZERO a cada rodada, entao item que saiu do manifest (fonte que virou .ttc,
+  # plugin que mudou de raiz) ficava no disco sem registro nenhum: orfao,
+  # invisivel pro --uninstall e pro proprio instalador. varre o registro
+  # anterior e resolve item por item — mas so remove dentro do escopo que ESTA
+  # rodada realmente gerenciou. o que cai fora (tipico: Plugins/ de um SketchUp
+  # abaixo do min_sketchup) NAO e apagado — seria tirar ferramenta que funciona
+  # de quem nao tem pra onde atualizar; fica no registro como legado, pra o
+  # --uninstall ainda dar conta dele.
+  #
+  # o carry-forward roda SEMPRE (mesmo com HAD_ERROR=1), igual ao
+  # $mantidosAbaixoDoMinimo do install.ps1: rodada com erro em um item nao pode
+  # apagar do registro o caminho de OUTRO item que nem foi tocado (o plugin no
+  # SketchUp abaixo do minimo). o snapshot e reconstruido do zero, entao deixar
+  # de re-anexar aqui significa perder o caminho pra sempre — orfao invisivel
+  # pro --uninstall. quem continua gateado por HAD_ERROR e so a REMOCAO: com
+  # erro na rodada, o que esta no disco pode ser justamente o que nao conseguiu
+  # ser reinstalado agora.
+  if [ "${#SNAP_ITEM_PATHS[@]}" -gt 0 ]; then
+    local si snap_p snap_lbl in_new in_scope vd np
+    for si in "${!SNAP_ITEM_PATHS[@]}"; do
+      snap_p="${SNAP_ITEM_PATHS[$si]}"
+      snap_lbl="${SNAP_ITEM_LABELS[$si]:-item}"
+
+      in_new=0
+      if [ "${#ITEM_PATHS[@]}" -gt 0 ]; then
+        for np in "${ITEM_PATHS[@]}"; do
+          if [ "$np" = "$snap_p" ]; then
+            in_new=1
+            break
+          fi
+        done
+      fi
+      if [ "$in_new" = "1" ]; then
+        continue
+      fi
+
+      # escopo gerido agora: as fontes (so se instalamos fontes nesta rodada —
+      # manifest sem fontes nao pode significar "apague as 22 que ja estao la")
+      # e os Plugins/ das versoes do SketchUp que esta rodada atendeu.
+      in_scope=0
+      if [ "$FONTS_INSTALLED_COUNT" -gt 0 ]; then
+        case "$snap_p" in "$FONTS_DIR"/*) in_scope=1 ;; esac
+      fi
+      if [ "$in_scope" = "0" ] && [ "${#VERSION_DIRS[@]}" -gt 0 ]; then
+        for vd in "${VERSION_DIRS[@]}"; do
+          case "$snap_p" in "$vd"/*) in_scope=1; break ;; esac
+        done
+      fi
+
+      if [ "$in_scope" = "1" ]; then
+        if [ "$HAD_ERROR" = "0" ] && is_allowed_removal_path "$snap_p" && [ -e "$snap_p" ]; then
+          rm -rf -- "$snap_p"
+          log "removido (saiu desta versão da biblioteca): $snap_p"
+        fi
+        continue
+      fi
+
+      if [ -e "$snap_p" ]; then
+        # prefixo "legado:" e idempotente — nao se acumula a cada rodada.
+        case "$snap_lbl" in
+          legado:*) ;;
+          *) snap_lbl="legado: $snap_lbl" ;;
+        esac
+        ITEM_LABELS+=("$snap_lbl")
+        ITEM_PATHS+=("$snap_p")
+        log "mantido no registro como legado (fora do escopo desta versão): $snap_p"
+      fi
+    done
+  fi
+
   # se algo falhou nesta rodada (HAD_ERROR=1), NAO grava a nova
   # biblioteca_version — grava a versao antiga do snapshot anterior (ou vazio
   # se nunca houve snapshot), pra proxima rodada do updater nao cair no no-op
@@ -1071,7 +1337,7 @@ do_install() {
     fi
     # registra o auto-update mesmo no caminho "so fontes": e justo aqui que ele
     # importa — quando o SketchUp aparecer depois, o gatilho instala os plugins
-    # (o no-op acima nao dispara nesse caso). register_updater e no-op em quiet.
+    # (o no-op acima nao dispara nesse caso). em quiet nao chama launchctl.
     register_updater
     # fonte com falha de integridade (HAD_ERROR=1) e falha real, nao "parcial
     # limpo" — nao mascarar num exit 1 igual ao caso 100% saudavel.
@@ -1111,18 +1377,25 @@ do_install() {
     fonts_suffix="; $FONTS_INSTALLED_COUNT fontes"
   fi
 
+  # quem tem 2017 e 2024 lia so "instalado em 1 versão" e nao fazia ideia de
+  # que uma ficou pra tras. dizer explicitamente.
+  local skipped_note=""
+  if [ "${#SKIPPED_YEARS[@]}" -gt 0 ]; then
+    skipped_note=" SketchUp ${SKIPPED_YEARS[*]} não recebe mais atualização da biblioteca (mínimo: SketchUp $MIN_SKETCHUP)."
+  fi
+
   local msg
   if [ -z "$ok_plugins_desc" ]; then
-    msg="nenhum plugin instalado (falha de integridade) em ${#VERSION_YEARS[@]} ${ver_word} do SketchUp (${versions_desc})${fonts_suffix}. log: $LOG_PATH."
+    msg="nenhum plugin instalado (falha de integridade) em ${#VERSION_YEARS[@]} ${ver_word} do SketchUp (${versions_desc})${fonts_suffix}. log: $LOG_PATH.${skipped_note}"
   else
-    msg="instalado: ${ok_plugins_desc} em ${#VERSION_YEARS[@]} ${ver_word} do SketchUp (${versions_desc})${fonts_suffix}. log: $LOG_PATH. abra o SketchUp e confira o menu Extensões."
+    msg="instalado: ${ok_plugins_desc} em ${#VERSION_YEARS[@]} ${ver_word} do SketchUp (${versions_desc})${fonts_suffix}. log: $LOG_PATH.${skipped_note} abra o SketchUp e confira o menu Extensões. ${BETA_NOTE}"
   fi
 
   if [ "$HAD_ERROR" = "1" ]; then
     say "$msg"
     log "resumo: instalação parcial (havia item com falha de integridade)"
     # falha parcial e exatamente quando a retentativa agendada mais importa —
-    # registra igual ao caminho de sucesso (register_updater e no-op em quiet).
+    # registra igual ao caminho de sucesso (em quiet nao chama launchctl).
     register_updater
     exit 2
   fi
@@ -1131,8 +1404,8 @@ do_install() {
     printf '%sok /%s %s\n' "$C_BOLD" "$C_RESET" "$msg"
   fi
   log "resumo: ok / $msg"
-  # instalacao interativa bem-sucedida: registra o auto-update (login + diaria).
-  # no-op em quiet.
+  # instalacao bem-sucedida: registra o auto-update (login + diaria). em quiet
+  # so reescreve o plist se mudou, sem chamar launchctl.
   register_updater
   exit 0
 }
@@ -1230,7 +1503,113 @@ do_uninstall() {
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-if [ "$UNINSTALL" = "1" ]; then
+# "limpar sketchup": esvazia o Plugins/ de TODA versao encontrada, preservando
+# so o que comeca com cura_. NUNCA apaga — MOVE pra uma pasta de recuperacao em
+# Documentos, porque aqui a gente mexe em plugin pago de terceiro (TT_Lib2 e
+# dependencia de Solid Inspector2, Vertex Tools, QuadFace Tools).
+# ponytail: sem seleção item-a-item e sem varrer versoes < MIN_SKETCHUP no
+# filtro do do_install — de proposito, limpeza tem que pegar todas. Se um dia
+# precisar de escolha por plugin, vira UI no proprio cura | ferramentas.
+do_limpar() {
+  local destino_base achados=() d base year plugins_dir item nome resposta
+  local falhas=0 nao_sairam=""
+
+  if [ "$QUIET" = "1" ]; then
+    err "--limpar nao roda em modo silencioso: exige confirmacao."
+    # "exit" e nao "return": do_limpar e chamado como ultimo comando do "then"
+    # la embaixo, entao um return nao-zero NAO e isento do set -e e disparava o
+    # trap ERR, imprimindo "erro inesperado" por cima da mensagem certa.
+    exit 2
+  fi
+
+  # mesmas duas protecoes do do_install, que faltavam aqui: (1) mover pasta de
+  # plugin com o SketchUp aberto quebra a sessao em curso, e o aluno culpa a
+  # limpeza; (2) o launchagent de auto-update pode disparar no meio da limpeza
+  # mexendo no mesmo Plugins/ — e exatamente pra isso que o lock existe.
+  if ! acquire_lock; then
+    say "outra operação da biblioteca cura já está em andamento. tente de novo em alguns minutos."
+    exit 0
+  fi
+  wait_sketchup_closed
+
+  destino_base="$RECOVERY_BASE"
+
+  for d in "$APP_SUPPORT_DIR"/"SketchUp 20"*; do
+    [ -d "$d" ] || continue
+    base="$(basename "$d")"
+    year="${base#SketchUp }"
+    year="${year%% *}"
+    case "$year" in '' | *[!0-9]*) continue ;; esac
+    plugins_dir="$d/SketchUp/Plugins"
+    [ -d "$plugins_dir" ] || continue
+    for item in "$plugins_dir"/*; do
+      [ -e "$item" ] || continue
+      nome="$(basename "$item")"
+      # su_* sao os plugins que a propria Trimble instala aqui (su_sandbox =
+      # Sandbox Tools, su_dynamiccomponents, su_solarnorth). Mover isso tira
+      # ferramenta nativa do SketchUp do aluno — fica de fora da limpeza.
+      case "$nome" in cura_* | su_*) continue ;; esac
+      achados+=("$year$US$plugins_dir$US$nome")
+    done
+  done
+
+  if [ "${#achados[@]}" -eq 0 ]; then
+    printf '%s\n' "nada pra limpar: so o cura esta instalado."
+    return 0
+  fi
+
+  printf '%s\n' "$SEPARADOR"
+  printf '%s\n' "${C_BOLD}vao sair do SketchUp ${#achados[@]} itens:${C_RESET}"
+  for item in "${achados[@]}"; do
+    printf '  SketchUp %s  ->  %s\n' "${item%%"$US"*}" "${item##*"$US"}"
+  done
+  printf '%s\n' "$SEPARADOR"
+  printf '%s\n' "eles NAO serao apagados. vao pra:"
+  printf '  %s\n' "$destino_base"
+  printf '%s\n' "o cura | ferramentas fica onde esta."
+  printf '\n%s' "confirma? [s/N] "
+  # 2>/dev/null ANTES do "<": o bash aplica redirect da esquerda pra direita, e
+  # na ordem invertida a falha de abrir /dev/tty vaza o erro cru do bash na
+  # cara do aluno. mesma armadilha documentada no wait_sketchup_closed.
+  read -r resposta 2>/dev/null < /dev/tty || resposta=""
+  case "$resposta" in
+    s | S | sim | SIM) ;;
+    *) printf '%s\n' "cancelado, nada foi movido."; return 0 ;;
+  esac
+
+  for item in "${achados[@]}"; do
+    year="${item%%"$US"*}"
+    nome="${item##*"$US"}"
+    plugins_dir="${item#*"$US"}"; plugins_dir="${plugins_dir%"$US"*}"
+    if move_to_recovery "$plugins_dir/$nome" "$destino_base/SketchUp $year"; then
+      log "limpeza: movido $plugins_dir/$nome"
+    else
+      falhas=$((falhas + 1))
+      nao_sairam="$nao_sairam
+  SketchUp $year  ->  $nome"
+      log "limpeza: nao consegui mover $plugins_dir/$nome — continua la"
+    fi
+  done
+
+  # numa operacao vendida como "nunca apaga, sempre da pra desfazer", dizer
+  # "pronto" quando o item continua no Plugins/ e o pior tipo de mentira. o
+  # fecho e condicional e a saida e nao-zero quando ficou item pra tras.
+  if [ "$falhas" -gt 0 ]; then
+    err "$falhas item(ns) nao sairam do Plugins e continuam la:$nao_sairam"
+    printf '%s\n' "o que saiu esta em:"
+    printf '  %s\n' "$destino_base"
+    printf '%s\n' "log: $LOG_PATH"
+    exit 1
+  fi
+
+  printf '\n%s\n' "${C_VERDE}pronto.${C_RESET} tudo que saiu esta em:"
+  printf '  %s\n' "$destino_base"
+  printf '%s\n' "arrependeu? e so arrastar de volta pra pasta Plugins."
+}
+
+if [ "$LIMPAR" = "1" ]; then
+  do_limpar
+elif [ "$UNINSTALL" = "1" ]; then
   do_uninstall
 else
   do_install

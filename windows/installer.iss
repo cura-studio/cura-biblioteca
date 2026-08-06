@@ -5,7 +5,8 @@
 ; arquivo separado (BASE/install.ps1) e SO promove por cima do embutido se o
 ; download deu certo e o arquivo parece valido (tamanho minimo); se falhar,
 ; segue com o embutido mesmo. Executa o script (visivel) e traduz o exit code
-; dele (0/1/2) pra mensagem final. No uninstall, CurUninstallStepChanged roda
+; dele (0 ok / 1 sem SketchUp / 2 erro / 3 so SketchUp abaixo do minimo) pra
+; mensagem final. No uninstall, CurUninstallStepChanged roda
 ; o mesmo script cacheado com -Uninstall -Force (funciona offline), guarda o
 ; exit code e salva uma copia do log fora de {app} antes do [UninstallDelete].
 ;
@@ -51,12 +52,20 @@ Name: "brazilianportuguese"; MessagesFile: "compiler:Languages\BrazilianPortugue
 ; do sistema; capitalizacao natural ajuda o aluno a achar o programa).
 [Messages]
 brazilianportuguese.WelcomeLabel1=biblioteca cura
-brazilianportuguese.WelcomeLabel2=este instalador baixa e instala a versão mais recente dos plugins e fontes do método cura.%n%nfeche o SketchUp antes de continuar.
+brazilianportuguese.WelcomeLabel2=este instalador baixa e instala a versão mais recente dos plugins e fontes do método cura.%n%nesta é uma versão beta: seguimos testando e corrigindo.%n%nfeche o SketchUp antes de continuar.
 brazilianportuguese.FinishedHeadingLabel=pronto
-brazilianportuguese.FinishedLabel=biblioteca cura instalada. abra o SketchUp e confira o menu Extensões.
+brazilianportuguese.FinishedLabel=biblioteca cura (beta) instalada. abra o SketchUp e confira o menu Extensões.%n%nachou algum problema? mande o log pro suporte.
 
 [Files]
 Source: "..\scripts\install.ps1"; DestDir: "{app}"; Flags: ignoreversion
+
+; "limpar sketchup" vira atalho no menu Iniciar em vez de um segundo .exe:
+; outro executavel significaria outro aviso do SmartScreen pro aluno.
+[Icons]
+Name: "{autoprograms}\{#MyAppName}\limpar SketchUp"; \
+  Filename: "powershell.exe"; \
+  Parameters: "-NoProfile -NoExit -ExecutionPolicy Bypass -File ""{app}\install.ps1"" -Limpar"; \
+  Comment: "tira do SketchUp o que nao e do cura nem nativo do SketchUp (move, nao apaga)"
 
 ; Checkbox padrao do Inno na pagina final (desmarcado): abre o log no notepad.
 ; O texto do proprio resumo (FinishedLabel) e customizado em CurPageChanged
@@ -102,7 +111,7 @@ begin
 end;
 
 { Roda o install.ps1 cacheado na pasta do app, visivel - o aluno acompanha
-  o progresso no console - e devolve o exit code real do script (0/1/2). }
+  o progresso no console - e devolve o exit code real do script (0/1/2/3). }
 function RunInstallScript(ScriptPath: String; var ResCode: Integer): Boolean;
 var
   Cmd: String;
@@ -217,6 +226,15 @@ begin
       WizardForm.FinishedLabel.Caption :=
         'SketchUp não encontrado neste computador. instalamos somente as fontes (quando disponíveis).' + #13#10 + #13#10 +
         'instale o SketchUp e execute este instalador novamente para concluir a instalação dos plugins.' + #13#10 + #13#10 +
+        'log: ' + LogPathCura
+    else if ResultCodeCura = 3 then
+      { 3 = tem SketchUp, so e anterior ao min_sketchup do manifest. Dizer
+        "SketchUp nao encontrado" aqui (o que o exit 1 faz) e falso pra quem
+        tem o 2017 instalado e vira ticket de suporte. O ano abaixo acompanha
+        o min_sketchup do manifest.json - atualizar os dois juntos. }
+      WizardForm.FinishedLabel.Caption :=
+        'o seu SketchUp é anterior a 2018. as ferramentas pedem SketchUp 2018 ou mais novo, então só as fontes foram instaladas.' + #13#10 + #13#10 +
+        'atualize o SketchUp e rode este instalador de novo.' + #13#10 + #13#10 +
         'log: ' + LogPathCura
     else if ResultCodeCura = 2 then
       WizardForm.FinishedLabel.Caption :=

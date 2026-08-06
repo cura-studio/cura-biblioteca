@@ -21,6 +21,44 @@ jobs:
       - name: recalcula sha256 (tools/make_manifest.py)
         run: python3 tools/make_manifest.py
 
+      # gate de versao: os tres numeros que decidem se o parque recebe a
+      # release sao editados A MAO em arquivos diferentes (tag, manifest,
+      # VERSION dentro do rbz). Divergiu -> falha silenciosa em producao:
+      # tag != biblioteca_version faz os dois instaladores curto-circuitarem
+      # em "ja esta atualizada" (biblioteca_version e o unico criterio de
+      # no-op) e ninguem baixa nada; manifest.plugins[0].version != VERSION do
+      # rbz deixa banner de update permanente que reinstalar nunca limpa.
+      - name: gate de versao (tag == biblioteca_version, manifest == rbz)
+        run: |
+          set -euo pipefail
+          # v9.2.0 -> BASE=9.2.0 SUFFIX=""; v9.2.0-rc1 -> BASE=9.2.0 SUFFIX=rc1
+          BASE="${GITHUB_REF_NAME#v}"
+          SUFFIX=""
+          case "$BASE" in
+            *-*) SUFFIX="${BASE#*-}"; BASE="${BASE%%-*}" ;;
+          esac
+          case "$SUFFIX" in
+            "")
+              : ;;
+            rc[0-9] | rc[0-9][0-9])
+              echo "::warning::tag $GITHUB_REF_NAME tem sufixo -$SUFFIX: sai como prerelease e NAO vira /releases/latest/download — nenhum aluno recebe. so serve pra teste; release de verdade e vX.Y.Z sem sufixo." ;;
+            *)
+              echo "::error::tag $GITHUB_REF_NAME tem hifen: prerelease: contains(github.ref_name, '-') marca esta release como prerelease, e o parque so conhece /releases/latest/download, que ignora prerelease — ZERO aluno receberia. use vX.Y.Z pra valer, ou -rcN (rc1..rc99) pra teste deliberado."
+              exit 1 ;;
+          esac
+          MAN=$(python3 -c "import json;print(json.load(open('manifest.json'))['biblioteca_version'])")
+          PLG=$(python3 -c "import json;print(json.load(open('manifest.json'))['plugins'][0]['version'])")
+          RBZ=$(unzip -p payload/cura-ferramentas.rbz cura_ferramentas.rb \
+                | sed -n "s/.*VERSION *= *'\([^']*\)'.*/\1/p" | head -1)
+          UI=$(unzip -p payload/cura-ferramentas.rbz cura_ferramentas/core/shell.html \
+                | sed -n "s/.*CURA_UI_VERSION *= *'\([^']*\)'.*/\1/p" | head -1)
+          echo "tag=$GITHUB_REF_NAME base=$BASE biblioteca_version=$MAN plugin=$PLG rbz=$RBZ ui=$UI"
+          [ -n "$RBZ" ] || { echo "::error::nao extrai VERSION de cura_ferramentas.rb dentro do rbz"; exit 1; }
+          [ -n "$UI" ] || { echo "::error::nao extrai CURA_UI_VERSION de core/shell.html dentro do rbz"; exit 1; }
+          [ "$BASE" = "$MAN" ] || { echo "::error::tag $BASE != biblioteca_version $MAN do manifest — o parque inteiro faria no-op (no-op do snapshot no install.sh / Test-CuraUpToDate no install.ps1) e ninguem receberia esta release"; exit 1; }
+          [ "$PLG" = "$RBZ" ] || { echo "::error::manifest plugins[0].version $PLG != VERSION $RBZ dentro do rbz — banner de update permanente no plugin (core/updater.rb)"; exit 1; }
+          [ "$UI" = "$RBZ" ] || { echo "::error::CURA_UI_VERSION $UI != VERSION $RBZ — rbz nao saiu do build.sh"; exit 1; }
+
       - name: sobe manifest.json atualizado
         uses: actions/upload-artifact@v4
         with:
@@ -80,7 +118,12 @@ jobs:
       - name: publica release
         uses: softprops/action-gh-release@v2
         with:
-          fail_on_unmatched_files: false
+          # os 6 assets sao todos obrigatorios (todos buscados por URL em
+          # runtime): faltar um publica release verde e quebrada — sem
+          # fonts.zip todo instalador loga erro, grava a biblioteca_version
+          # ANTIGA no snapshot e re-tenta todo dia; sem install.sh a linha do
+          # Terminal do mac vira 404.
+          fail_on_unmatched_files: true
           # tags com sufixo (ex: v9.1.0-rc1, v9.1.0-beta) viram prerelease e
           # nunca /releases/latest/download - só release cheia (vX.Y.Z) vira
           # "latest" e é puxada pelo auto-update do parque inteiro.

@@ -29,14 +29,46 @@ param(
     # sem esperar o SketchUp fechar (adia se estiver aberto), no-op quando já
     # está na versão do manifest.
     [switch]$Quiet,
+    # -Limpar: "limpar SketchUp". Move todo plugin de terceiro pra uma pasta de
+    # recuperação em Documentos, preservando só o cura. Não instala nada.
+    [switch]$Limpar,
     [string]$BaseUrl = $(if ($env:CURA_BASE_URL) { $env:CURA_BASE_URL } else { "https://github.com/joaotegoni/cura-biblioteca/releases/latest/download" })
 )
+
+# --- WOW64: o Setup.exe do Inno é 32-bit, então este script nasce em SysWOW64
+# e enxerga o registro redirecionado (HKLM\SOFTWARE\WOW6432Node), onde o
+# SketchUp não aparece. Re-executa em 64-bit REPASSANDO os parâmetros — sem
+# repassar, a desinstalação do Inno viraria uma instalação completa. Se o
+# sysnative não existir, segue em 32-bit mesmo. Tem que vir logo depois do
+# param(), que é a primeira instrução executável obrigatória. ---
+if ($env:PROCESSOR_ARCHITECTURE -eq 'x86' -and [Environment]::Is64BitOperatingSystem) {
+    $sysnativePs = Join-Path $env:windir "sysnative\WindowsPowerShell\v1.0\powershell.exe"
+    if (Test-Path -LiteralPath $sysnativePs) {
+        $fwd = @()
+        foreach ($k in $PSBoundParameters.Keys) {
+            $v = $PSBoundParameters[$k]
+            if ($v -is [switch]) {
+                if ($v.IsPresent) { $fwd += "-$k" }
+            } else {
+                $fwd += @("-$k", "$v")
+            }
+        }
+        & $sysnativePs -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath @fwd
+        $rc = $LASTEXITCODE
+        if ($null -eq $rc) { $rc = 2 }
+        exit $rc
+    }
+}
 
 # URL FIXA da release oficial — usada só pelo registro do auto-update. Nunca
 # usa $BaseUrl aqui: o updater tem que puxar sempre da release de verdade,
 # mesmo que esta execução esteja com CURA_BASE_URL apontando pasta de teste.
 $script:OfficialBaseUrl = "https://github.com/joaotegoni/cura-biblioteca/releases/latest/download"
 $script:UpdaterTaskName = "CURA Biblioteca Updater"
+# Chave de fontes per-user. Escopo de SCRIPT de propósito: o -Uninstall roda e
+# sai muito antes do bloco de fontes, então uma variável criada lá embaixo
+# chegaria $null na remoção.
+$script:FontsRegKey = "HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Fonts"
 
 # --- TLS 1.2 + encoding do console (tem que vir antes de qualquer output) ---
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -77,7 +109,10 @@ if (-not (Test-Path -LiteralPath $AppDataDir)) {
 
 function Write-CuraBanner {
     param([Parameter(Mandatory = $true)][string]$LogPath)
-    $marca = "{ cura }  biblioteca 9.0"
+    # sem número de versão aqui (paridade com o banner() do install.sh): o
+    # banner é impresso antes do download do manifest, que é a única fonte de
+    # verdade da versão. A versão real sai no resumo final.
+    $marca = "{ cura }  biblioteca"
     if ($script:AnsiOk) {
         Write-Host "  $($script:AnsiMarca)$marca$($script:AnsiReset)"
     } else {
@@ -214,27 +249,45 @@ function Get-CuraPluginPayload {
 }
 
 function Get-CuraSketchUpVersions {
-    # Detecta instalações do SketchUp em %APPDATA%\SketchUp\SketchUp 20XX e
-    # devolve só as que atendem $MinVersion. Nunca lança erro se a pasta raiz
-    # não existir (SketchUp não instalado ainda).
+    # Detecta instalações do SketchUp por DUAS vias e une os anos:
+    #   1. a pasta de perfil %APPDATA%\SketchUp\SketchUp 20XX;
+    #   2. as chaves que o instalador da Trimble cria no registro
+    #      (HKLM/HKCU \Software\SketchUp\SketchUp 20XX).
+    # Só a pasta não bastava: ela é do PERFIL e não existe num SketchUp
+    # recém-instalado que nunca foi aberto - o instalador dizia "SketchUp não
+    # encontrado" com o programa ali na frente do aluno. Ler HKLM exige view
+    # 64-bit; a guarda de sysnative lá no topo garante isso.
+    # Devolve só os anos que atendem $MinVersion. Nunca lança erro se nada
+    # existir (SketchUp não instalado ainda).
     param([Parameter(Mandatory = $true)][int]$MinVersion)
-    $result = @()
+    $anos = @{}
     $root = Join-Path $env:APPDATA "SketchUp"
     try {
-        $dirs = Get-ChildItem -Path $root -Directory -Filter "SketchUp 20*" -ErrorAction Stop
+        $dirs = @(Get-ChildItem -Path $root -Directory -Filter "SketchUp 20*" -ErrorAction Stop)
     } catch {
-        return $result
+        $dirs = @()
     }
     foreach ($dir in $dirs) {
-        if ($dir.Name -match '20\d\d') {
-            $year = [int]$Matches[0]
-            if ($year -ge $MinVersion) {
-                $pluginsPath = Join-Path $dir.FullName "SketchUp\Plugins"
-                $result += [PSCustomObject]@{
-                    Year        = $year
-                    VersionDir  = $dir.FullName
-                    PluginsPath = $pluginsPath
-                }
+        if ($dir.Name -match '20\d\d') { $anos[[int]$Matches[0]] = $true }
+    }
+    foreach ($hive in @("HKLM:\SOFTWARE\SketchUp", "HKCU:\Software\SketchUp")) {
+        try {
+            $keys = @(Get-ChildItem -Path $hive -ErrorAction Stop)
+        } catch {
+            continue
+        }
+        foreach ($k in $keys) {
+            if ($k.PSChildName -match '^SketchUp (20\d\d)$') { $anos[[int]$Matches[1]] = $true }
+        }
+    }
+    $result = @()
+    foreach ($year in ($anos.Keys | Sort-Object)) {
+        if ($year -ge $MinVersion) {
+            $versionDir = Join-Path $root "SketchUp $year"
+            $result += [PSCustomObject]@{
+                Year        = $year
+                VersionDir  = $versionDir
+                PluginsPath = (Join-Path $versionDir "SketchUp\Plugins")
             }
         }
     }
@@ -380,7 +433,7 @@ function Register-CuraUpdater {
         # termina com `exit`, que mataria este wrapper inteiro antes de
         # conseguir copiar o script pro cache depois. Rodando como filho, o
         # exit code vem por $LASTEXITCODE sem derrubar o wrapper. Se rodou
-        # até um dos exit codes esperados do próprio script (0/1/2 - ou seja,
+        # até um dos exit codes esperados do próprio script (0/1/2/3 - ou seja,
         # não foi um crash/parse error), copia o baixado por cima do cache em
         # {localappdata}\CURA-Biblioteca\install.ps1 (se o dir existir), pra
         # que o uninstall do Inno (que roda essa cópia congelada) também
@@ -392,7 +445,7 @@ function Register-CuraUpdater {
 try { Invoke-WebRequest -Uri `$u -OutFile `$o -UseBasicParsing -TimeoutSec 60 -ErrorAction Stop } catch { exit 0 }
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `$o -Quiet
 `$code = `$LASTEXITCODE
-if (`$code -eq 0 -or `$code -eq 1 -or `$code -eq 2) {
+if (`$code -eq 0 -or `$code -eq 1 -or `$code -eq 2 -or `$code -eq 3) {
     `$cache = Join-Path `$env:LOCALAPPDATA 'CURA-Biblioteca'
     if (Test-Path -LiteralPath `$cache) {
         Copy-Item -LiteralPath `$o -Destination (Join-Path `$cache 'install.ps1') -Force -ErrorAction SilentlyContinue
@@ -414,10 +467,23 @@ exit `$code
                 -Principal $principal -Settings $settings -Force -ErrorAction Stop | Out-Null
             Write-CuraLog -LogPath $LogPath -Message "auto-update registrado (logon + diária)"
         } else {
-            # fallback Win7/PS3 sem o módulo ScheduledTasks: schtasks.exe (só logon).
-            $tr = "powershell.exe $psArgs"
-            & schtasks.exe /Create /TN $TaskName /TR $tr /SC ONLOGON /F 2>$null | Out-Null
-            Write-CuraLog -LogPath $LogPath -Message "auto-update registrado via schtasks (logon)"
+            # fallback sem o módulo ScheduledTasks (Win7 + WMF 5.1): schtasks.exe
+            # (só logon). O /TR aceita no máximo 262 caracteres e o
+            # -EncodedCommand sozinho passa de 1800 - embutir o base64 aqui
+            # nunca criava a tarefa. Grava o wrapper como arquivo e aponta a
+            # tarefa pra ele (~135 caracteres).
+            $updaterPath = Join-Path $AppDataDir "updater.ps1"
+            Set-Content -LiteralPath $updaterPath -Value $inner -Encoding UTF8
+            # as \" são pro schtasks, não pro PowerShell: ele repassa a string
+            # inteira entre aspas e o schtasks precisa das aspas internas pra
+            # aguentar um caminho de perfil com espaço.
+            $tr = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \`"$updaterPath\`""
+            & schtasks.exe /Create /TN $TaskName /TR $tr /SC ONLOGON /F 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                Write-CuraLog -LogPath $LogPath -Message "auto-update registrado via schtasks (logon)"
+            } else {
+                Write-CuraLog -LogPath $LogPath -Message "aviso: não foi possível registrar o auto-update (schtasks retornou $LASTEXITCODE) - a biblioteca não vai se atualizar sozinha nesta máquina."
+            }
         }
     } catch {
         Write-CuraLog -LogPath $LogPath -Message "aviso: não foi possível registrar o auto-update: $($_.Exception.Message)"
@@ -430,11 +496,27 @@ function Unregister-CuraUpdater {
         [Parameter(Mandatory = $true)][string]$LogPath
     )
     try {
+        # log honesto: só diz que desregistrou se alguma das duas vias tirou a
+        # tarefa de verdade. "não estava registrada" também é informação útil
+        # numa triagem de "o aluno não recebe update".
+        $removido = $false
         if (Get-Command Unregister-ScheduledTask -ErrorAction SilentlyContinue) {
-            Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+            try {
+                Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
+                $removido = $true
+            } catch {
+                $removido = $false
+            }
         }
-        & schtasks.exe /Delete /TN $TaskName /F 2>$null | Out-Null
-        Write-CuraLog -LogPath $LogPath -Message "auto-update desregistrado"
+        if (-not $removido) {
+            & schtasks.exe /Delete /TN $TaskName /F 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) { $removido = $true }
+        }
+        if ($removido) {
+            Write-CuraLog -LogPath $LogPath -Message "auto-update desregistrado"
+        } else {
+            Write-CuraLog -LogPath $LogPath -Message "auto-update não estava registrado (nada a remover)"
+        }
     } catch {
         # tarefa pode nem existir — ignorar
     }
@@ -525,7 +607,11 @@ function Invoke-CuraUninstall {
             Remove-Item -LiteralPath $f.file -Force -ErrorAction SilentlyContinue
             Write-CuraLog -LogPath $LogPath -Message "fonte removida: $($f.file)"
         }
-        Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Fonts" -Name $f.reg_name -ErrorAction SilentlyContinue
+        # -ErrorAction não suprime erro de BINDING: reg_name vazio no snapshot
+        # estouraria aqui no meio da desinstalação.
+        if (-not [string]::IsNullOrEmpty($f.reg_name)) {
+            Remove-ItemProperty -Path $script:FontsRegKey -Name $f.reg_name -ErrorAction SilentlyContinue
+        }
     }
 
     Unregister-CuraUpdater -TaskName $script:UpdaterTaskName -LogPath $LogPath
@@ -568,7 +654,125 @@ if (-not $script:CuraMutexOwned) {
     exit 0
 }
 
+function Invoke-CuraLimpar {
+    # "limpar SketchUp": esvazia o Plugins/ de TODA versão encontrada,
+    # preservando só o que começa com cura_. NUNCA apaga — MOVE pra uma pasta
+    # de recuperação em Documentos, porque aqui a gente mexe em plugin pago de
+    # terceiro (TT_Lib2 é dependência de Solid Inspector², Vertex Tools,
+    # QuadFace Tools).
+    # ponytail: sem seleção item-a-item, e o -MinVersion 0 é de propósito —
+    # limpeza tem que pegar todas as versões, inclusive as que o instalador
+    # pula. Se um dia precisar de escolha por plugin, vira UI no próprio plugin.
+    param(
+        [Parameter(Mandatory = $true)][string]$LogPath,
+        [switch]$Force
+    )
+
+    $destinoBase = Join-Path ([Environment]::GetFolderPath('MyDocuments')) `
+        ("cura-plugins-removidos\" + (Get-Date -Format "yyyy-MM-dd-HHmm"))
+
+    $achados = @()
+    foreach ($v in @(Get-CuraSketchUpVersions -MinVersion 0)) {
+        if (-not (Test-Path -LiteralPath $v.PluginsPath)) { continue }
+        foreach ($item in Get-ChildItem -LiteralPath $v.PluginsPath -Force -ErrorAction SilentlyContinue) {
+            # su_* são os plugins que a própria Trimble instala aqui
+            # (su_sandbox = Sandbox Tools, su_dynamiccomponents, su_solarnorth).
+            # Mover isso tira ferramenta nativa do SketchUp do aluno.
+            if ($item.Name -like 'cura_*' -or $item.Name -like 'su_*') { continue }
+            # lixo do Explorer que o -Force traz junto: não é plugin, não
+            # entra na contagem (o mac já ignora o equivalente, .DS_Store).
+            if ($item.Name -in @('desktop.ini', 'Thumbs.db')) { continue }
+            $achados += [PSCustomObject]@{ Year = $v.Year; Path = $item.FullName; Name = $item.Name }
+        }
+    }
+
+    if ($achados.Count -eq 0) {
+        Write-Host "nada pra limpar: só o cura está instalado."
+        return
+    }
+
+    Write-Host ""
+    Write-Host "vão sair do SketchUp $($achados.Count) itens:"
+    foreach ($a in $achados) { Write-Host "  SketchUp $($a.Year)  ->  $($a.Name)" }
+    Write-Host ""
+    Write-Host "eles NÃO serão apagados. vão pra:"
+    Write-Host "  $destinoBase"
+    Write-Host "o cura | ferramentas fica onde está."
+
+    if (-not $Force) {
+        $resp = Read-Host "confirma? [s/N]"
+        if ($resp -notmatch '^(s|sim)$') {
+            Write-Host "cancelado, nada foi movido."
+            return
+        }
+    }
+
+    $movidos = 0
+    $falhas  = 0
+    foreach ($a in $achados) {
+        $destino = Join-Path $destinoBase ("SketchUp " + $a.Year)
+        New-Item -ItemType Directory -Path $destino -Force | Out-Null
+        # nome já ocupado no destino (duas limpezas no mesmo minuto, ou o mesmo
+        # plugin em duas versões do SketchUp) ganha sufixo em vez de estourar o
+        # Move-Item.
+        $alvo = Join-Path $destino $a.Name
+        $n = 2
+        while (Test-Path -LiteralPath $alvo) {
+            $alvo = Join-Path $destino ($a.Name + "-" + $n)
+            $n++
+        }
+        try {
+            Move-Item -LiteralPath $a.Path -Destination $alvo -Force
+            Write-CuraLog -LogPath $LogPath -Message "limpeza: movido $($a.Path)"
+            $movidos++
+        } catch {
+            # Move-Item de PASTA não atravessa volume ("must have identical
+            # roots") - acontece de verdade com Documentos redirecionado pro D:
+            # ou pra um servidor. Copia e só então apaga a origem: se a cópia
+            # falhar, a origem fica intacta.
+            try {
+                Copy-Item -LiteralPath $a.Path -Destination $alvo -Recurse -Force
+                Remove-Item -LiteralPath $a.Path -Recurse -Force
+                Write-CuraLog -LogPath $LogPath -Message "limpeza: movido (cópia + remoção, volumes diferentes) $($a.Path)"
+                $movidos++
+            } catch {
+                Write-CuraLog -LogPath $LogPath -Message "limpeza: não consegui mover $($a.Name) - $($_.Exception.Message)" -IsError
+                Write-Host "não consegui mover $($a.Name) — pulei."
+                $falhas++
+            }
+        }
+    }
+
+    $itemWord = if ($movidos -eq 1) { "item movido" } else { "itens movidos" }
+    Write-Host ""
+    if ($falhas -gt 0) {
+        Write-Host "$movidos $itemWord, $falhas não saíram (veja o log)."
+    } else {
+        Write-Host "pronto. $movidos $itemWord."
+    }
+    Write-Host "tudo que saiu está em:"
+    Write-Host "  $destinoBase"
+    Write-Host "arrependeu? é só arrastar de volta pra pasta Plugins."
+    Write-Host "abra o SketchUp pra conferir."
+}
+
 try {
+    if ($Limpar) {
+        if ($Quiet) {
+            Write-CuraLog -LogPath $LogPath -Message "-Limpar não roda em modo silencioso: exige confirmação." -IsError
+            exit 2
+        }
+        # mexer em Plugins/ com o SketchUp aberto deixa a limpeza pela metade:
+        # plugin com binário nativo carregado (.so/.dll) trava o Move-Item, e o
+        # programa ainda reescreve arquivo lá ao fechar. A limpeza é sempre
+        # interativa, então o modo interativo do Wait é o certo aqui.
+        Wait-CuraSketchUpClosed -LogPath $LogPath
+        # sem -Force: a confirmação da limpeza é sempre pedida (README e o
+        # --limpar do mac não têm escape).
+        Invoke-CuraLimpar -LogPath $LogPath
+        exit 0
+    }
+
     if ($Uninstall) {
         Invoke-CuraUninstall -SnapshotPath $SnapshotPath -LogPath $LogPath -Force:$Force
     }
@@ -588,6 +792,11 @@ try {
         $ok = Get-CuraAsset -BaseUrl $BaseUrl -FileName "manifest.json" -OutFile $manifestPath -LogPath $LogPath
         if (-not $ok) {
             Write-CuraLog -LogPath $LogPath -Message "erro / não foi possível baixar manifest.json. sem internet ou GitHub inacessível." -IsError
+            # registra o auto-update mesmo sem manifest: a máquina que pegou a
+            # internet fora se conserta sozinha no próximo logon, sem depender
+            # de o aluno rodar o Setup.exe de novo. A função é tolerante a
+            # falha e idempotente.
+            Register-CuraUpdater -TaskName $script:UpdaterTaskName -OfficialBaseUrl $script:OfficialBaseUrl -LogPath $LogPath
             Write-Host ""
             Write-Host "log completo em: $LogPath"
             exit 2
@@ -602,7 +811,12 @@ try {
         # @() força array mesmo quando exatamente 1 versão é detectada (o
         # PowerShell 5.1 "desembrulha" coleção de 1 elemento no retorno de
         # função, o que quebraria .Count mais abaixo).
-        $versions = @(Get-CuraSketchUpVersions -MinVersion $manifest.min_sketchup)
+        $allVersions = @(Get-CuraSketchUpVersions -MinVersion 0)
+        $versions = @($allVersions | Where-Object { $_.Year -ge $manifest.min_sketchup })
+        # versões antigas demais pro release atual: não recebem plugin, mas
+        # precisam aparecer na mensagem final - senão o aluno cujo único
+        # SketchUp é o 2017 lê "SketchUp não encontrado", que é falso.
+        $belowMin = @($allVersions | Where-Object { $_.Year -lt $manifest.min_sketchup })
         $noSketchUpFound = ($versions.Count -eq 0)
 
         # --- No-op: nada mudou desde a última instalação? pula tudo. Mantém o
@@ -733,30 +947,216 @@ try {
                     Write-CuraLog -LogPath $LogPath -Message "erro / sha256 não confere para $($manifest.fonts.file). fontes não serão instaladas." -IsError
                     $hadErrors = $true
                 } else {
-                    $fontsZipRenamed = Join-Path $TempDir "fonts-payload.zip"
-                    Copy-Item -LiteralPath $fontsZipDest -Destination $fontsZipRenamed -Force
-                    $fontsExtractDir = Join-Path $TempDir "fonts-extract"
-                    New-Item -ItemType Directory -Path $fontsExtractDir -Force | Out-Null
-                    Expand-Archive -LiteralPath $fontsZipRenamed -DestinationPath $fontsExtractDir -Force
+                    # Passo inteiro dentro de try/catch: descompactar, criar o
+                    # dir de fontes do perfil e a chave do registro são passos
+                    # arriscados (ACL, redirecionamento, disco cheio) e uma
+                    # exceção aqui subiria pro catch global - que faz exit 2
+                    # ANTES de gravar o snapshot e de registrar o auto-update,
+                    # deixando plugin em disco sem installed.json. Mesma
+                    # maquinaria de $hadErrors já usada nos plugins: falha de
+                    # fonte vira "fica pra próxima rodada".
+                    try {
+                        $fontsZipRenamed = Join-Path $TempDir "fonts-payload.zip"
+                        Copy-Item -LiteralPath $fontsZipDest -Destination $fontsZipRenamed -Force
+                        $fontsExtractDir = Join-Path $TempDir "fonts-extract"
+                        New-Item -ItemType Directory -Path $fontsExtractDir -Force | Out-Null
+                        # ZipFile em vez de Expand-Archive: a maioria dos
+                        # arquivos tem colchete no nome (Inter[opsz,wght].ttf,
+                        # convenção das Google Fonts variáveis) e o
+                        # Expand-Archive do PS 5.1 trata colchete como wildcard
+                        # em alguns caminhos internos. A API .NET não tem
+                        # semântica de glob nenhuma.
+                        Add-Type -AssemblyName System.IO.Compression.FileSystem
+                        [System.IO.Compression.ZipFile]::ExtractToDirectory($fontsZipRenamed, $fontsExtractDir)
 
-                    $winFontsDir = Join-Path $env:LOCALAPPDATA "Microsoft\Windows\Fonts"
-                    New-Item -ItemType Directory -Path $winFontsDir -Force | Out-Null
+                        $winFontsDir = Join-Path $env:LOCALAPPDATA "Microsoft\Windows\Fonts"
+                        New-Item -ItemType Directory -Path $winFontsDir -Force | Out-Null
 
-                    $fontFiles = Get-ChildItem -Path $fontsExtractDir -Recurse -File | Where-Object {
-                        $_.Extension -match '^\.(ttf|otf|ttc)$'
-                    }
-                    foreach ($f in $fontFiles) {
-                        $destFontPath = Join-Path $winFontsDir $f.Name
-                        Copy-Item -LiteralPath $f.FullName -Destination $destFontPath -Force
-                        $regName = "$([System.IO.Path]::GetFileNameWithoutExtension($f.Name)) (TrueType)"
-                        New-ItemProperty -Path "HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Fonts" -Name $regName -Value $destFontPath -PropertyType String -Force | Out-Null
-                        Write-CuraLog -LogPath $LogPath -Message "fonte instalada: $($f.Name)"
-                        $installedFonts += [PSCustomObject]@{ file = $destFontPath; reg_name = $regName }
+                        # A chave de fontes per-user NÃO existe num perfil que
+                        # nunca instalou fonte (PC recém-formatado): ela nasce
+                        # junto com o diretório acima, no primeiro uso.
+                        # New-ItemProperty cria VALOR, não cria a chave. Test-Path
+                        # antes do New-Item pra nunca mexer numa chave que já
+                        # tem as fontes do aluno dentro.
+                        $fontsKeyOk = $true
+                        if (-not (Test-Path -LiteralPath $script:FontsRegKey)) {
+                            try {
+                                New-Item -Path $script:FontsRegKey -Force | Out-Null
+                            } catch {
+                                Write-CuraLog -LogPath $LogPath -Message "erro / não consegui criar a chave de fontes do usuário: $($_.Exception.Message). fontes não serão registradas." -IsError
+                                $hadErrors = $true
+                                $fontsKeyOk = $false
+                            }
+                        }
+
+                        # O nome do VALOR no registro é o que o Windows mostra na
+                        # lista de fontes. Pra .ttc ele precisa listar TODAS as
+                        # faces da coleção separadas por " & ", senão só a primeira
+                        # aparece no Photoshop/InDesign/Illustrator. Esses nomes são
+                        # gerados junto com o fonts.zip (tools/make_fonts.py) e vêm
+                        # em names.json — aqui não dá pra ler a name table sem
+                        # dependência externa.
+                        $regNames = @{}
+                        $namesJson = Join-Path $fontsExtractDir "names.json"
+                        if (Test-Path -LiteralPath $namesJson) {
+                            try {
+                                $parsed = Get-Content -LiteralPath $namesJson -Raw -Encoding UTF8 | ConvertFrom-Json
+                                foreach ($p in $parsed.PSObject.Properties) { $regNames[$p.Name] = $p.Value }
+                            } catch {
+                                Write-CuraLog -LogPath $LogPath -Message "names.json ilegível, caindo no nome do arquivo: $($_.Exception.Message)"
+                            }
+                        }
+
+                        # Copiar o arquivo e gravar o registro PERSISTE a fonte,
+                        # mas quem publica a lista na sessão em curso é o logon.
+                        # AddFontResourceW + broadcast de WM_FONTCHANGE fazem as
+                        # fontes aparecerem sem reiniciar o computador.
+                        # Best-effort: se o Add-Type falhar, segue sem isso.
+                        $script:FontApiOk = $false
+                        try {
+                            if (-not ('Cura.FontApi' -as [type])) {
+                                Add-Type -Namespace Cura -Name FontApi -MemberDefinition @'
+[DllImport("gdi32.dll", CharSet = CharSet.Unicode)]
+public static extern int AddFontResourceW(string path);
+[DllImport("user32.dll", CharSet = CharSet.Auto)]
+public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam, uint flags, uint timeout, out IntPtr result);
+'@
+                            }
+                            $script:FontApiOk = $true
+                        } catch {
+                            Write-CuraLog -LogPath $LogPath -Message "aviso: não deu pra carregar a api de fontes do Windows ($($_.Exception.Message)) - as fontes só aparecem depois de logoff e login."
+                        }
+
+                        if ($fontsKeyOk) {
+                            $fontFiles = Get-ChildItem -LiteralPath $fontsExtractDir -Recurse -File | Where-Object {
+                                $_.Extension -match '^\.(ttf|otf|ttc)$'
+                            }
+                            foreach ($f in $fontFiles) {
+                                # coleção sem nome pronto no names.json não pode
+                                # ser instalada: o nome do registro teria que
+                                # listar todas as faces separadas por " & " e
+                                # aqui não dá pra ler a name table. Registrada
+                                # pelo nome do arquivo, só a 1ª face apareceria
+                                # nos programas e o aluno teria que desinstalar
+                                # na mão - fonte que fica pra próxima rodada é
+                                # o estrago menor.
+                                if ((-not $regNames.ContainsKey($f.Name)) -and ($f.Extension -ieq '.ttc')) {
+                                    Write-CuraLog -LogPath $LogPath -Message "erro / sem nome de registro para $($f.Name) - coleção não instalada (só a 1ª face apareceria nos programas)." -IsError
+                                    $hadErrors = $true
+                                    continue
+                                }
+                                try {
+                                    if ($regNames.ContainsKey($f.Name)) {
+                                        $regName = $regNames[$f.Name]
+                                    } else {
+                                        # (TrueType) vale pra .ttf e pra .ttc com
+                                        # outlines glyf; (OpenType) é só pra CFF (.otf).
+                                        $sufixo = if ($f.Extension -ieq '.otf') { '(OpenType)' } else { '(TrueType)' }
+                                        $regName = "$([System.IO.Path]::GetFileNameWithoutExtension($f.Name)) $sufixo"
+                                    }
+                                    $destFontPath = Join-Path $winFontsDir $f.Name
+                                    Copy-Item -LiteralPath $f.FullName -Destination $destFontPath -Force
+                                    New-ItemProperty -Path $script:FontsRegKey -Name $regName -Value $destFontPath -PropertyType String -Force | Out-Null
+                                    if ($script:FontApiOk) {
+                                        [Cura.FontApi]::AddFontResourceW($destFontPath) | Out-Null
+                                    }
+                                    Write-CuraLog -LogPath $LogPath -Message "fonte instalada: $($f.Name)"
+                                    $installedFonts += [PSCustomObject]@{ file = $destFontPath; reg_name = $regName }
+                                } catch {
+                                    # arquivo já instalado e travado por outro app
+                                    # (Photoshop/InDesign aberto), antivírus, ACL.
+                                    # Não apagar o destino no catch: pode ser fonte
+                                    # do próprio aluno. Com $hadErrors a rodada
+                                    # grava a version antiga e o updater retenta.
+                                    Write-CuraLog -LogPath $LogPath -Message "erro / falha ao instalar a fonte $($f.Name) (arquivo em uso por outro app?): $($_.Exception.Message)" -IsError
+                                    $hadErrors = $true
+                                }
+                            }
+
+                            if ($script:FontApiOk -and $installedFonts.Count -gt 0) {
+                                try {
+                                    # HWND_BROADCAST (0xffff) / WM_FONTCHANGE (0x1d),
+                                    # SMTO_ABORTIFHUNG + 1s pra não travar atrás de
+                                    # programa pendurado.
+                                    $fontMsgResult = [IntPtr]::Zero
+                                    [Cura.FontApi]::SendMessageTimeout([IntPtr]0xffff, 0x1d, [IntPtr]::Zero, [IntPtr]::Zero, 2, 1000, [ref]$fontMsgResult) | Out-Null
+                                } catch {
+                                    Write-CuraLog -LogPath $LogPath -Message "aviso: não deu pra avisar os programas abertos sobre as fontes novas: $($_.Exception.Message)"
+                                }
+                            }
+                        }
+                    } catch {
+                        Write-CuraLog -LogPath $LogPath -Message "erro / falha ao preparar/instalar as fontes: $($_.Exception.Message)" -IsError
+                        $hadErrors = $true
                     }
                 }
             }
         } else {
             Write-CuraLog -LogPath $LogPath -Message "manifest ainda sem fontes definidas - etapa pulada."
+        }
+
+        # --- 8b. Fonte que saiu do payload: tira do disco e do registro. Sem
+        # isso, fonte removida num release futuro ficaria pra sempre no
+        # Photoshop do aluno E sumiria do snapshot (o -Uninstall nunca mais a
+        # encontraria). Só roda em rodada limpa: com $hadErrors, o que está no
+        # disco pode ser justamente o que não conseguiu ser reinstalado agora.
+        # Mesma whitelist de prefixo do Invoke-CuraUninstall. ---
+        if ((-not $hadErrors) -and ($null -ne $manifest.fonts) -and ($null -ne $oldSnapshot) -and ($null -ne $oldSnapshot.fonts)) {
+            $arquivosNovos = @($installedFonts | ForEach-Object { $_.file })
+            $fontsDirEsperado = [System.IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA "Microsoft\Windows\Fonts"))
+            foreach ($old in $oldSnapshot.fonts) {
+                if ($arquivosNovos -contains $old.file) { continue }
+                $dentroDoEsperado = $false
+                try {
+                    $dentroDoEsperado = ([System.IO.Path]::GetFullPath($old.file)).StartsWith($fontsDirEsperado, [StringComparison]::OrdinalIgnoreCase)
+                } catch {
+                    $dentroDoEsperado = $false
+                }
+                if (-not $dentroDoEsperado) {
+                    Write-CuraLog -LogPath $LogPath -Message "aviso: caminho de fonte fora do diretório esperado, ignorado: $($old.file)"
+                    continue
+                }
+                if (Test-Path -LiteralPath $old.file) {
+                    Remove-Item -LiteralPath $old.file -Force -ErrorAction SilentlyContinue
+                }
+                if (-not [string]::IsNullOrEmpty($old.reg_name)) {
+                    Remove-ItemProperty -Path $script:FontsRegKey -Name $old.reg_name -ErrorAction SilentlyContinue
+                }
+                Write-CuraLog -LogPath $LogPath -Message "fonte obsoleta removida: $($old.file)"
+            }
+        }
+
+        # --- 8c. Versão do SketchUp antiga demais pro min_sketchup atual: o
+        # plugin que um release anterior instalou nela continua lá e continua
+        # funcionando. Carrega a entrada do snapshot antigo pra frente (só o
+        # que ainda existe em disco) em vez de deixar sumir - senão o
+        # -Uninstall nunca mais acharia essa cópia e a desinstalação viraria
+        # incompleta e silenciosa. Nunca apagar por conta própria: quem
+        # instalou não pediu pra perder a ferramenta, e o updater roda em
+        # silêncio. ---
+        $mantidosAbaixoDoMinimo = @()
+        if (($null -ne $oldSnapshot) -and ($null -ne $oldSnapshot.sketchup_versions)) {
+            foreach ($oldVer in $oldSnapshot.sketchup_versions) {
+                if ($versions.Year -contains $oldVer.year) { continue }
+                if ([string]::IsNullOrEmpty($oldVer.plugins_path)) { continue }
+                $aindaEmDisco = @()
+                foreach ($p in $oldVer.plugins) {
+                    $presente = $true
+                    foreach ($r in $p.roots) {
+                        if (-not (Test-Path -LiteralPath (Join-Path $oldVer.plugins_path $r))) { $presente = $false }
+                    }
+                    if ($presente) { $aindaEmDisco += $p }
+                }
+                if ($aindaEmDisco.Count -gt 0) {
+                    $snapshotVersions += [PSCustomObject]@{
+                        year         = $oldVer.year
+                        plugins_path = $oldVer.plugins_path
+                        plugins      = $aindaEmDisco
+                    }
+                    $mantidosAbaixoDoMinimo += $oldVer.year
+                    Write-CuraLog -LogPath $LogPath -Message "mantido no snapshot sem update (SketchUp $($oldVer.year) < min_sketchup $($manifest.min_sketchup)): $($oldVer.plugins_path)"
+                }
+            }
         }
 
         # --- 9. Snapshot (para desinstalação futura) ---
@@ -798,37 +1198,71 @@ try {
         Register-CuraUpdater -TaskName $script:UpdaterTaskName -OfficialBaseUrl $script:OfficialBaseUrl -LogPath $LogPath
 
         # --- 11. Resumo final (voz cura: minúsculo, sem emoji, tag "ok /" só no
-        # sucesso limpo - mesmo criterio do install.sh: 1 = só "sem SketchUp",
+        # sucesso limpo - mesmo critério do install.sh: 1 = só "sem SketchUp",
         # 2 = qualquer falha de integridade/download, mesmo com SketchUp achado) ---
         Write-Host ""
+        $fonteNoun  = if ($installedFonts.Count -eq 1) { "fonte" } else { "fontes" }
+        $fonteVerbo = if ($installedFonts.Count -eq 1) { "instalada" } else { "instaladas" }
         if ($noSketchUpFound) {
-            if ($installedFonts.Count -gt 0) {
-                Write-Host "SketchUp não encontrado neste computador. $($installedFonts.Count) fontes instaladas."
+            # 1 = não tem SketchUp nenhum; 3 = tem, mas é anterior ao
+            # min_sketchup. Códigos diferentes porque o installer.iss escreve a
+            # tela final a partir daqui: com 1 ele manda "instale o SketchUp",
+            # frase falsa (e ticket de suporte na certa) pra quem tem o 2017.
+            $exitSemSketchUp = 1
+            if ($belowMin.Count -gt 0) {
+                # tem SketchUp sim, só é anterior ao min_sketchup deste release.
+                # Dizer "não encontrado" aqui é falso e vira ticket de suporte.
+                $exitSemSketchUp = 3
+                $anosAntigos = (($belowMin | ForEach-Object { $_.Year } | Sort-Object) -join ", ")
+                Write-Host "o cura | ferramentas pede SketchUp $($manifest.min_sketchup) ou mais novo. neste computador encontrei só o SketchUp $anosAntigos."
+                if ($installedFonts.Count -gt 0) {
+                    Write-Host "as fontes foram instaladas normalmente."
+                }
             } else {
-                Write-Host "SketchUp não encontrado neste computador."
+                if ($installedFonts.Count -gt 0) {
+                    Write-Host "SketchUp não encontrado neste computador. $($installedFonts.Count) $fonteNoun $fonteVerbo."
+                } else {
+                    Write-Host "SketchUp não encontrado neste computador."
+                }
+                Write-Host "instale o SketchUp e rode este instalador novamente para concluir a instalação dos plugins."
             }
-            Write-Host "instale o SketchUp e rode este instalador novamente para concluir a instalação dos plugins."
             Write-Host "log: $LogPath"
-            exit 1
+            exit $exitSemSketchUp
         }
 
+        # Só o que passou na verificação de sha256 entra no resumo: montar a
+        # lista a partir de $manifest.plugins faria o instalador afirmar que
+        # instalou justamente o item que o download corrompeu.
         $pluginSummaryParts = @()
-        foreach ($plugin in $manifest.plugins) {
-            $pluginSummaryParts += "$($plugin.name) v$($plugin.version)"
+        foreach ($vp in $verifiedPlugins) {
+            $pluginSummaryParts += "$($vp.Plugin.name) v$($vp.Plugin.version)"
         }
-        $pluginSummary = $pluginSummaryParts -join ", "
+        $verWord = if ($versions.Count -eq 1) { "versão" } else { "versões" }
         $versionsList = ($versions | ForEach-Object { $_.Year }) -join ", "
-        $msg = "instalado: $pluginSummary em $($versions.Count) versões do SketchUp ($versionsList); $($installedFonts.Count) fontes."
+        if ($pluginSummaryParts.Count -eq 0) {
+            $msg = "nenhum plugin instalado (falha de integridade) em $($versions.Count) $verWord do SketchUp ($versionsList); $($installedFonts.Count) $fonteNoun."
+        } else {
+            $pluginSummary = $pluginSummaryParts -join ", "
+            $msg = "instalado: $pluginSummary em $($versions.Count) $verWord do SketchUp ($versionsList); $($installedFonts.Count) $fonteNoun."
+        }
 
         if ($hadErrors) {
             Write-Host $msg
-            Write-Host "algum item teve falha de integridade (download corrompido) - veja o log para detalhes."
+            Write-Host "algum item falhou (download, integridade ou fonte em uso) - veja o log para detalhes."
             Write-Host "log: $LogPath"
             exit 2
         }
 
         Write-Host "ok / $msg"
         Write-Host "abra o SketchUp > extensões pra conferir."
+        if ($installedFonts.Count -gt 0) {
+            Write-Host "se alguma fonte não aparecer no seu programa, feche e abra o programa (ou faça logoff e login)."
+        }
+        if ($mantidosAbaixoDoMinimo.Count -gt 0) {
+            Write-Host "o cura | ferramentas continua instalado no seu SketchUp $($mantidosAbaixoDoMinimo -join ', '), mas não recebe mais atualização - a partir desta versão pedimos o $($manifest.min_sketchup). pra tirar, use o desinstalador."
+        }
+        # aviso de beta - remover quando a biblioteca sair do beta (ver README).
+        Write-Host "esta é uma versão beta: seguimos testando e corrigindo. se algo falhar, mande o log pro suporte."
         Write-Host "log: $LogPath"
         exit 0
     } finally {

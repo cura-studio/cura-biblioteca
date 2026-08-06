@@ -1,0 +1,12 @@
+# Arquivos do lado Windows são commitados com CRLF + BOM UTF-8 e têm que
+# chegar assim em toda máquina. Sem isto, o core.autocrlf=true do runner
+# windows-latest converteria os finais de linha no checkout e o install.ps1
+# embutido no Setup.exe ficaria diferente do baixado pelo auto-update.
+# "-text" = git nunca normaliza nem converte estes arquivos.
+*.ps1 -text
+*.bat -text
+*.cmd -text
+*.iss -text
+
+# Do lado Unix o oposto: LF sempre.
+*.sh text eol=lf
