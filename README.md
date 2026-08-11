@@ -95,6 +95,7 @@ O campo `fonts.url` do manifest é **reservado**: existe pra espelhar o bloco de
 Três números decidem se o aluno recebe a atualização — `biblioteca_version`, `plugins[].version` e a tag — e os três são editados **na mão**, em lugares diferentes. `make_manifest.py` não bumpa nenhum deles: só recalcula sha256 e confere.
 
 1. Copie o `.rbz` novo (e o `fonts.zip`, se mudou) para `payload/` e **versione**: `git status` não pode mostrar nada de `payload/` como untracked. O CI publica com `fail_on_unmatched_files: true` e falha se faltar asset.
+   - Mudou o cura upscaler? Rode `python3 tools/make_photoshop.py <fonte-jsx>`: ele regenera `payload/photoshop.zip` **e** `payload/CuraUpscaler.jsx` (link de resgate da página do curso) **juntos**, e os dois têm que ser versionados. Não regerar os dois é release quebrada na cara do aluno — o gate do CI compara o sha256 do `.jsx` solto com o de dentro do zip e reprova se divergirem.
 2. Edite `manifest.json` na mão:
    - `plugins[0].version` = a constante `VERSION` de dentro do `.rbz`. É o que o updater dentro do plugin compara: errado pra menos, o banner de atualização nunca aparece; pra mais, ele aparece pra sempre e reinstalar não limpa.
    - `biblioteca_version` = a versão nova da biblioteca (a tag sem o `v`). É o **único** critério de no-op dos instaladores: se não mudar, todo mundo responde "já está atualizada" e o payload novo nem é baixado.

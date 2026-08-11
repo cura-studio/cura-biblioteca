@@ -37,6 +37,16 @@ SNAPSHOT_PATH="$CURA_STATE_DIR/installed.json"
 LOG_PATH="$CURA_STATE_DIR/install.log"
 FONTS_DIR="$HOME/Library/Fonts"
 
+# pasta compartilhada do Cura Upscaler (Photoshop). NAO e per-user de proposito:
+# o .atn que o aluno carrega no Photoshop tem este caminho CRAVADO dentro dele
+# (tools/make_photoshop.py, MAC_DIR), entao tem que ser o mesmo pra qualquer
+# usuario da maquina. /Users/Shared existe em todo mac, e gravavel sem admin e
+# e legivel por todo mundo. Se este caminho mudar, mudam junto: MAC_DIR do
+# make_photoshop.py, o PASTAS[] do tools/instalar-cura-upscaler.jsx e o
+# $script:PhotoshopDir do install.ps1.
+PHOTOSHOP_BASE_DIR="/Users/Shared/CURA-Biblioteca"
+PHOTOSHOP_DIR="$PHOTOSHOP_BASE_DIR/photoshop"
+
 # porao de recuperacao: TUDO que sai de um Plugins/ por acao nossa (o "limpar
 # sketchup" e a lista "remove" do manifest) vai pra ca — nunca apaga, sempre da
 # pra arrastar de volta. carimbo com segundos: duas rodadas no mesmo minuto nao
@@ -144,6 +154,15 @@ say() {
 err() {
   printf '%s%s%s\n' "$C_ERRO" "$1" "$C_RESET" >&2
   log "erro: $1"
+}
+
+# aviso: visivel como o err() (stderr, aparece mesmo em quiet no updater.err),
+# mas SEM o terracota — a paleta reserva a cor pra erro terminal, e aviso nao
+# ganha cor propria. usado pelo passo bonus do cura upscaler, que nunca e falha
+# de instalacao: o log registra "aviso:", nao "erro:".
+warn() {
+  printf '%s\n' "$1" >&2
+  log "aviso: $1"
 }
 
 # catch-all pra falhas inesperadas (disco cheio, permissao negada, etc) que
@@ -276,6 +295,25 @@ fetch_asset() {
   fi
 }
 
+# fetch_asset_optional <nome-relativo-a-BASE_URL> <destino>
+# igual ao fetch_asset, mas NAO aborta: devolve 1 e deixa quem chama decidir.
+# existe pro passo do photoshop, que e bonus — um 404 ou uma queda de rede la
+# nao pode desfazer/impedir a instalacao do plugin e das fontes, que e o que o
+# aluno realmente veio buscar.
+fetch_asset_optional() {
+  local name="$1" dest="$2"
+  if is_local_base "$BASE_URL"; then
+    local src_dir src
+    src_dir="$(local_base_path "$BASE_URL")"
+    src="$src_dir/$name"
+    [ -e "$src" ] || return 1
+    cp "$src" "$dest" || return 1
+    return 0
+  fi
+  curl -fsSL --retry 3 --connect-timeout 30 --speed-limit 1024 --speed-time 60 "$BASE_URL/$name" -o "$dest" || return 1
+  return 0
+}
+
 # fetch_absolute_url <url-ou-path-absoluta> <destino>
 # usado quando um plugin declara "url" propria no manifest (em vez de null).
 fetch_absolute_url() {
@@ -311,9 +349,20 @@ is_safe_leaf_name() {
 
 is_allowed_removal_path() {
   local p="$1"
+  # ".." em QUALQUER posicao reprova antes de olhar prefixo: os padroes abaixo
+  # casam por prefixo literal, entao "$PHOTOSHOP_DIR/../../algo" (ou o mesmo
+  # truque nos Plugins/Fonts) passava na whitelist e virava alvo de rm -rf. o
+  # caminho vem do installed.json, que e arquivo em disco e pode estar
+  # adulterado/corrompido — nao ha caso legitimo com ".." no snapshot.
+  case "$p" in
+    *..*) return 1 ;;
+  esac
   case "$p" in
     "$APP_SUPPORT_DIR"/SketchUp\ */SketchUp/Plugins/*) return 0 ;;
     "$FONTS_DIR"/*) return 0 ;;
+    # pasta compartilhada do Photoshop: e da BIBLIOTECA (so o instalador
+    # escreve la), entao o --uninstall pode tirar o que registrou no snapshot.
+    "$PHOTOSHOP_DIR"/*) return 0 ;;
     "$CURA_STATE_DIR"/*) return 0 ;;
     *) return 1 ;;
   esac
@@ -369,6 +418,11 @@ def main():
     if fonts:
         families = fonts.get("families", []) or []
         emit("FONTS", fonts.get("file", ""), fonts.get("sha256", ""), ",".join(families))
+
+    # bloco opcional (manifest velho em cache nao tem): ausente = etapa pulada.
+    photoshop = data.get("photoshop")
+    if photoshop:
+        emit("PHOTOSHOP", photoshop.get("file", ""), photoshop.get("sha256", ""))
 
     for name in data.get("remove", []) or []:
         emit("REMOVE", name)
@@ -456,7 +510,12 @@ state == "roots" {
 }
 
 state == "top" && /^  "fonts": null/ { next }
-state == "top" && /^  "fonts": \{/ {
+# o guard do bloco vazio: "fonts": {} numa linha so casa a regra de entrada mas
+# NUNCA casa a regra de saida (o "}" ja passou), entao o parser ficaria preso no
+# state ate o fim do arquivo e engoliria em silencio tudo que vem depois (o
+# bloco photoshop e a lista remove). linha que ja traz o fechamento = bloco
+# vazio = ausente, igual ao "if fonts:" do parser python.
+state == "top" && /^  "fonts": \{/ && $0 !~ /\{[[:space:]]*\}/ {
   state = "fonts"
   f_file = ""; f_sha256 = ""; f_families = ""
   next
@@ -474,6 +533,25 @@ state == "families" && /^    \]/ { state = "fonts"; next }
 state == "families" {
   v = arrval($0)
   f_families = (f_families == "") ? v : f_families "," v
+  next
+}
+
+# bloco photoshop (Cura Upscaler): mesmo formato do fonts — opcional, some sem
+# erro num manifest antigo. a linha "url": null cai fora de qualquer regra e e
+# ignorada, igual acontece no bloco fonts. o mesmo guard de bloco vazio do
+# fonts vale aqui: "photoshop": {} numa linha so entraria no state e nunca
+# sairia, comendo a lista remove logo abaixo.
+state == "top" && /^  "photoshop": null/ { next }
+state == "top" && /^  "photoshop": \{/ && $0 !~ /\{[[:space:]]*\}/ {
+  state = "photoshop"
+  ps_file = ""; ps_sha256 = ""
+  next
+}
+state == "photoshop" && /^    "file":/   { ps_file = strval($0); next }
+state == "photoshop" && /^    "sha256":/ { ps_sha256 = strval($0); next }
+state == "photoshop" && /^  \}/ {
+  print "PHOTOSHOP" US ps_file US ps_sha256
+  state = "top"
   next
 }
 
@@ -621,6 +699,11 @@ BIBLIOTECA_VERSION=""
 PLUGIN_IDS=(); PLUGIN_NAMES=(); PLUGIN_VERSIONS=(); PLUGIN_FILES=()
 PLUGIN_URLS=(); PLUGIN_SHA256S=(); PLUGIN_ROOTS_CSV=()
 FONTS_FILE=""; FONTS_SHA256=""
+PHOTOSHOP_FILE=""; PHOTOSHOP_SHA256=""
+# 1 = o manifest TEM bloco photoshop, mas ele veio quebrado (campo faltando ou
+# sha256 fora do formato). Diferente de "sem bloco" (os dois campos vazios e
+# esta flag em 0), que e o manifest antigo em cache e nao e erro nenhum.
+PHOTOSHOP_INVALID=0
 REMOVE_NAMES=()
 
 parse_manifest() {
@@ -674,6 +757,10 @@ parse_manifest() {
         FONTS_FILE="$f1"
         FONTS_SHA256="$f2"
         ;;
+      PHOTOSHOP)
+        PHOTOSHOP_FILE="$f1"
+        PHOTOSHOP_SHA256="$f2"
+        ;;
       REMOVE)
         REMOVE_NAMES+=("$f1")
         ;;
@@ -700,6 +787,28 @@ parse_manifest() {
   if [ "${#PLUGIN_IDS[@]}" -eq 0 ] && [ -z "$FONTS_FILE" ]; then
     err "manifest.json inválido (sem plugins e sem fontes). log: $LOG_PATH. tente de novo mais tarde."
     exit 2
+  fi
+
+  # validacao pos-parse do bloco photoshop, mesma logica dos campos acima: o
+  # awk sai 0 mesmo sem casar nada, entao um bloco meio-parseado viraria "file
+  # sem sha" e o passo tentaria instalar sem conferir integridade. Aqui,
+  # porem, NAO abortamos: o photoshop e bonus e nao pode derrubar plugin e
+  # fontes (o passo la embaixo transforma isso em AVISO puro, sem HAD_ERROR e
+  # sem mexer no exit code).
+  # os dois campos vazios = manifest sem o bloco (cache antigo), caso normal.
+  PHOTOSHOP_SHA256="$(printf '%s' "$PHOTOSHOP_SHA256" | tr 'A-F' 'a-f')"
+  if [ -n "$PHOTOSHOP_FILE" ] || [ -n "$PHOTOSHOP_SHA256" ]; then
+    local ps_ok=1
+    [ -n "$PHOTOSHOP_FILE" ] || ps_ok=0
+    is_safe_leaf_name "$PHOTOSHOP_FILE" || ps_ok=0
+    [ "${#PHOTOSHOP_SHA256}" -eq 64 ] || ps_ok=0
+    case "$PHOTOSHOP_SHA256" in *[!0-9a-f]*) ps_ok=0 ;; esac
+    if [ "$ps_ok" = "0" ]; then
+      log "aviso: bloco 'photoshop' do manifest inválido (file='$PHOTOSHOP_FILE', sha256='$PHOTOSHOP_SHA256') — cura upscaler não será instalado."
+      PHOTOSHOP_INVALID=1
+      PHOTOSHOP_FILE=""
+      PHOTOSHOP_SHA256=""
+    fi
   fi
 }
 
@@ -1094,10 +1203,31 @@ do_install() {
     # abaixo simplesmente nao dispara, seguindo como instalacao normal.
     read_snapshot || true
     if [ -n "$BIBLIOTECA_VERSION" ] && [ "$SNAP_BIBLIOTECA_VERSION" = "$BIBLIOTECA_VERSION" ] && [ "${#SNAP_ITEM_PATHS[@]}" -gt 0 ]; then
-      local noop=1 snap_path plugins_dir_c pi_c root_name_c old_ifs_c
+      local noop=1 snap_path plugins_dir_c pi_c root_name_c old_ifs_c ps_no_snap=1
       for snap_path in "${SNAP_ITEM_PATHS[@]}"; do
-        [ -e "$snap_path" ] || { noop=0; break; }
+        case "$snap_path" in
+          "$PHOTOSHOP_DIR"/*)
+            # a pasta compartilhada so conta pro no-op quando o manifest BAIXADO
+            # ainda tem bloco photoshop VALIDO (PHOTOSHOP_FILE vazio = bloco
+            # ausente ou quebrado). manifest velho em cache nao pode furar o
+            # no-op por causa de arquivo que ele nem gerencia mais.
+            [ -n "$PHOTOSHOP_FILE" ] || continue
+            ps_no_snap=0
+            [ -e "$snap_path" ] || { noop=0; break; }
+            ;;
+          *)
+            [ -e "$snap_path" ] || { noop=0; break; }
+            ;;
+        esac
       done
+      # manifest COM bloco photoshop e registro SEM nenhum arquivo do upscaler:
+      # a etapa bonus nunca completou (download/escrita falhou numa rodada
+      # anterior — falha que, de proposito, nao derruba a instalacao nem segura
+      # a biblioteca_version). fura o no-op pra tentar de novo. e este teste que
+      # transforma "bonus falhou hoje" em "bonus retentado amanha".
+      if [ -n "$PHOTOSHOP_FILE" ] && [ "$ps_no_snap" = "1" ]; then
+        noop=0
+      fi
       if [ "$noop" = "1" ] && [ "${#VERSION_DIRS[@]}" -gt 0 ]; then
         for plugins_dir_c in "${VERSION_DIRS[@]}"; do
           for pi_c in "${!PLUGIN_IDS[@]}"; do
@@ -1244,6 +1374,86 @@ do_install() {
     log "fontes: manifest sem fontes (fonts: null), etapa pulada."
   fi
 
+  # cura upscaler (Photoshop) — BONUS. Tres regras que valem so pra este passo:
+  #   1. independe de SketchUp (igual as fontes) e independe do Photoshop estar
+  #      instalado: sao 3 arquivos numa pasta, quem liga o atalho e o aluno
+  #      rodando o instalar-cura-upscaler.jsx uma vez;
+  #   2. NUNCA derruba a instalacao NEM o exit code — download, sha ou escrita
+  #      que falham viram AVISO e mais nada (sem HAD_ERROR): a biblioteca_version
+  #      e gravada normalmente e o exit segue o que plugin/fontes deram (sucesso
+  #      puro = 0). O retry nao vem do HAD_ERROR e sim do no-op la em cima, que
+  #      exige os arquivos do upscaler no registro quando o manifest tem o bloco
+  #      — falhou hoje, a rodada de amanha fura o no-op e tenta de novo. No
+  #      Windows isso ainda mata o modal de erro do Inno (exit 2) por falha de
+  #      bonus;
+  #   3. manifest sem o bloco (cache antigo de uma release anterior) = etapa
+  #      pulada em silencio, sem apagar nada do que ja esta la.
+  # A pasta e compartilhada de proposito (ver PHOTOSHOP_DIR la em cima): dir 777
+  # e arquivos 644. 777 e nao 775 porque /Users/Shared nasce com grupo wheel — o
+  # SEGUNDO usuario do mac nao esta nesse grupo e com 775 nao conseguiria gravar
+  # (nem remover) nada la. Sem sticky bit: o rm-antes-de-cp de uma rodada de
+  # outro usuario precisa poder tirar o arquivo 644 que nao e dele.
+  # RISCO ACEITO (de projeto, nao descuido): pasta 0777 sem sticky significa que
+  # qualquer usuario ou processo local da maquina pode trocar o CuraUpscaler.jsx
+  # que o F2 executa. Aceito porque as alternativas quebram o produto: o .atn
+  # tem o caminho CRAVADO (per-user nao serve), 775 morre no grupo wheel do
+  # /Users/Shared e o sticky bit mata o rm-antes-de-cp cross-user — e nada disso
+  # pode exigir admin.
+  local PHOTOSHOP_INSTALLED_COUNT=0
+  if [ "$PHOTOSHOP_INVALID" = "1" ]; then
+    warn "o manifest veio com o bloco do cura upscaler quebrado — ele não foi instalado (o resto da biblioteca seguiu normal). log: $LOG_PATH."
+  elif [ -n "$PHOTOSHOP_FILE" ]; then
+    mkdir -p "$TMP_DIR/payload"
+    local ps_dest="$TMP_DIR/payload/$PHOTOSHOP_FILE"
+    if ! fetch_asset_optional "$PHOTOSHOP_FILE" "$ps_dest"; then
+      warn "não deu pra baixar $PHOTOSHOP_FILE — cura upscaler não instalado (o resto da biblioteca seguiu normal). log: $LOG_PATH."
+    elif ! verify_sha256 "$ps_dest" "$PHOTOSHOP_SHA256"; then
+      warn "arquivo $PHOTOSHOP_FILE corrompido no download (sha256 não confere) — cura upscaler não instalado. log: $LOG_PATH. o instalador tenta de novo sozinho mais tarde."
+    else
+      local ps_extract="$TMP_DIR/photoshop_extracted"
+      rm -rf "$ps_extract"
+      mkdir -p "$ps_extract"
+      if ! unzip -oq "$ps_dest" -d "$ps_extract"; then
+        warn "não deu pra abrir $PHOTOSHOP_FILE — cura upscaler não instalado. log: $LOG_PATH."
+      elif ! mkdir -p "$PHOTOSHOP_DIR" 2>/dev/null; then
+        warn "não deu pra criar $PHOTOSHOP_DIR — cura upscaler não instalado. log: $LOG_PATH."
+      else
+        # a pasta pode ter sido criada por OUTRO usuario da maquina (ou por uma
+        # versao anterior deste instalador): chmod que falha e so log, nunca
+        # erro — o que importa e conseguir gravar os arquivos.
+        chmod 777 "$PHOTOSHOP_BASE_DIR" 2>/dev/null || log "aviso: não consegui ajustar permissão de $PHOTOSHOP_BASE_DIR (pasta de outro usuário?)"
+        chmod 777 "$PHOTOSHOP_DIR" 2>/dev/null || log "aviso: não consegui ajustar permissão de $PHOTOSHOP_DIR (pasta de outro usuário?)"
+
+        local ps_falhou=0 psfile psbase
+        while IFS= read -r psfile; do
+          psbase="$(basename "$psfile")"
+          # mesma guarda de sempre antes de compor caminho de rm/cp.
+          is_safe_leaf_name "$psbase" || continue
+          # rm antes do cp: arquivo gravado por outro usuario da maquina nao e
+          # sobrescrivel (644), mas E removivel numa pasta 777 sem sticky bit. e
+          # o que torna a segunda rodada limpa em vez de meio-atualizada.
+          rm -f "$PHOTOSHOP_DIR/$psbase" 2>/dev/null || true
+          if cp "$psfile" "$PHOTOSHOP_DIR/$psbase" 2>/dev/null; then
+            chmod 644 "$PHOTOSHOP_DIR/$psbase" 2>/dev/null || true
+            PHOTOSHOP_INSTALLED_COUNT=$((PHOTOSHOP_INSTALLED_COUNT + 1))
+            ITEM_LABELS+=("photoshop $psbase")
+            ITEM_PATHS+=("$PHOTOSHOP_DIR/$psbase")
+            log "cura upscaler: $PHOTOSHOP_DIR/$psbase"
+          else
+            ps_falhou=1
+            log "aviso: não consegui gravar $PHOTOSHOP_DIR/$psbase"
+          fi
+        done < <(find "$ps_extract" -type f)
+
+        if [ "$ps_falhou" = "1" ] || [ "$PHOTOSHOP_INSTALLED_COUNT" -eq 0 ]; then
+          warn "cura upscaler não instalado por completo (sem permissão na pasta compartilhada?) — o resto da biblioteca seguiu normal. log: $LOG_PATH."
+        fi
+      fi
+    fi
+  else
+    log "photoshop: manifest sem o bloco photoshop, etapa pulada."
+  fi
+
   # reconciliacao com a rodada anterior. o installed.json e reconstruido do
   # ZERO a cada rodada, entao item que saiu do manifest (fonte que virou .ttc,
   # plugin que mudou de raiz) ficava no disco sem registro nenhum: orfao,
@@ -1288,6 +1498,12 @@ do_install() {
       if [ "$FONTS_INSTALLED_COUNT" -gt 0 ]; then
         case "$snap_p" in "$FONTS_DIR"/*) in_scope=1 ;; esac
       fi
+      # mesma regra das fontes pro cura upscaler: so entra no escopo se ESTA
+      # rodada realmente escreveu na pasta compartilhada — manifest sem o bloco
+      # photoshop nunca pode significar "apague o que ja esta la".
+      if [ "$in_scope" = "0" ] && [ "$PHOTOSHOP_INSTALLED_COUNT" -gt 0 ]; then
+        case "$snap_p" in "$PHOTOSHOP_DIR"/*) in_scope=1 ;; esac
+      fi
       if [ "$in_scope" = "0" ] && [ "${#VERSION_DIRS[@]}" -gt 0 ]; then
         for vd in "${VERSION_DIRS[@]}"; do
           case "$snap_p" in "$vd"/*) in_scope=1; break ;; esac
@@ -1329,11 +1545,20 @@ do_install() {
   if [ "$QUIET" != "1" ]; then
     printf '\n%s\n' "$SEPARADOR"
   fi
+
+  # o upscaler chega instalado mas ainda desligado: quem carrega o atalho F2 no
+  # Photoshop e o aluno, rodando o bootstrap uma vez. sem esta frase, os 3
+  # arquivos ficam na pasta compartilhada sem ninguem nunca saber.
+  local photoshop_note=""
+  if [ "$PHOTOSHOP_INSTALLED_COUNT" -gt 0 ]; then
+    photoshop_note=" cura upscaler instalado: pra ligar o atalho F2, abra o Photoshop em Arquivo > Scripts > Procurar e escolha $PHOTOSHOP_DIR/instalar-cura-upscaler.jsx (uma vez só)."
+  fi
+
   if [ "${#VERSION_YEARS[@]}" -eq 0 ]; then
     if [ "$FONTS_INSTALLED_COUNT" -gt 0 ]; then
-      say "fontes instaladas: $FONTS_INSTALLED_COUNT. log: $LOG_PATH."
+      say "fontes instaladas: $FONTS_INSTALLED_COUNT. log: $LOG_PATH.$photoshop_note"
     else
-      say "log: $LOG_PATH."
+      say "log: $LOG_PATH.$photoshop_note"
     fi
     # registra o auto-update mesmo no caminho "so fontes": e justo aqui que ele
     # importa — quando o SketchUp aparecer depois, o gatilho instala os plugins
@@ -1386,9 +1611,9 @@ do_install() {
 
   local msg
   if [ -z "$ok_plugins_desc" ]; then
-    msg="nenhum plugin instalado (falha de integridade) em ${#VERSION_YEARS[@]} ${ver_word} do SketchUp (${versions_desc})${fonts_suffix}. log: $LOG_PATH.${skipped_note}"
+    msg="nenhum plugin instalado (falha de integridade) em ${#VERSION_YEARS[@]} ${ver_word} do SketchUp (${versions_desc})${fonts_suffix}. log: $LOG_PATH.${skipped_note}${photoshop_note}"
   else
-    msg="instalado: ${ok_plugins_desc} em ${#VERSION_YEARS[@]} ${ver_word} do SketchUp (${versions_desc})${fonts_suffix}. log: $LOG_PATH.${skipped_note} abra o SketchUp e confira o menu Extensões. ${BETA_NOTE}"
+    msg="instalado: ${ok_plugins_desc} em ${#VERSION_YEARS[@]} ${ver_word} do SketchUp (${versions_desc})${fonts_suffix}. log: $LOG_PATH.${skipped_note}${photoshop_note} abra o SketchUp e confira o menu Extensões. ${BETA_NOTE}"
   fi
 
   if [ "$HAD_ERROR" = "1" ]; then
@@ -1449,10 +1674,18 @@ do_uninstall() {
   fi
 
   say "a biblioteca cura vai remover os seguintes itens:"
-  local i
+  local i tem_photoshop=0
   for i in "${!SNAP_ITEM_PATHS[@]}"; do
     printf -- '- %s: %s\n' "${SNAP_ITEM_LABELS[$i]:-item}" "${SNAP_ITEM_PATHS[$i]}"
+    case "${SNAP_ITEM_PATHS[$i]}" in "$PHOTOSHOP_DIR"/*) tem_photoshop=1 ;; esac
   done
+
+  # a lista acima nao deixa claro que os 3 arquivos do upscaler moram numa pasta
+  # da MAQUINA (/Users/Shared), nao do perfil: quem confirma achando que remove
+  # "a minha instalacao" tira o atalho F2 de todo mundo que usa este mac.
+  if [ "$tem_photoshop" = "1" ]; then
+    printf '%s\n' "o cura upscaler é compartilhado — remover tira ele de todos os usuários deste computador."
+  fi
 
   printf 'confirma a remoção? (s/n): '
   local resp=""
@@ -1482,6 +1715,12 @@ do_uninstall() {
       log "aviso: caminho fora do escopo permitido, ignorado na desinstalação: $path"
     fi
   done
+
+  # pasta compartilhada do Photoshop: os arquivos ja sairam pelo laco acima
+  # (estao no snapshot). o rmdir so remove dir VAZIO — se outro usuario da
+  # maquina tambem instalou, os arquivos dele seguram a pasta e nada acontece.
+  rmdir "$PHOTOSHOP_DIR" 2>/dev/null || true
+  rmdir "$PHOTOSHOP_BASE_DIR" 2>/dev/null || true
 
   # desregistra o auto-update junto: unload silencioso + remove o plist, antes
   # de apagar o snapshot. em teste (CURA_BASE_URL) pula o launchctl real mas

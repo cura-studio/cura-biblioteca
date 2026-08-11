@@ -54,7 +54,10 @@ Name: "brazilianportuguese"; MessagesFile: "compiler:Languages\BrazilianPortugue
 brazilianportuguese.WelcomeLabel1=biblioteca cura
 brazilianportuguese.WelcomeLabel2=este instalador baixa e instala a versão mais recente dos plugins e fontes do método cura.%n%nesta é uma versão beta: seguimos testando e corrigindo.%n%nfeche o SketchUp antes de continuar.
 brazilianportuguese.FinishedHeadingLabel=pronto
-brazilianportuguese.FinishedLabel=biblioteca cura (beta) instalada. abra o SketchUp e confira o menu Extensões.%n%nachou algum problema? mande o log pro suporte.
+; A linha do cura upscaler e a UNICA instrucao do passo F2 que sobrevive: o
+; console do install.ps1 fecha junto com o processo e leva a dica embora. Sem
+; ela, os 3 arquivos ficam na pasta compartilhada e ninguem liga o atalho.
+brazilianportuguese.FinishedLabel=biblioteca cura (beta) instalada. abra o SketchUp e confira o menu Extensões.%n%npra ativar o cura upscaler no photoshop, siga o passo único da página do curso.%n%nachou algum problema? mande o log pro suporte.
 
 [Files]
 Source: "..\scripts\install.ps1"; DestDir: "{app}"; Flags: ignoreversion
@@ -223,9 +226,15 @@ begin
   if CurPageID = wpFinished then
   begin
     if ResultCodeCura = 1 then
+      { A ponte do F2 repete aqui (e no ramo 3) de proposito: sobrescrever o
+        Caption apaga o FinishedLabel de [Messages], e o cura upscaler NAO
+        depende de SketchUp - quem cai neste ramo e justamente o aluno que tem
+        Photoshop e nao tem SketchUp. Sem a frase, os 3 arquivos ficam na pasta
+        compartilhada e ninguem liga o atalho. }
       WizardForm.FinishedLabel.Caption :=
         'SketchUp não encontrado neste computador. instalamos somente as fontes (quando disponíveis).' + #13#10 + #13#10 +
         'instale o SketchUp e execute este instalador novamente para concluir a instalação dos plugins.' + #13#10 + #13#10 +
+        'pra ativar o cura upscaler no photoshop, siga o passo único da página do curso.' + #13#10 + #13#10 +
         'log: ' + LogPathCura
     else if ResultCodeCura = 3 then
       { 3 = tem SketchUp, so e anterior ao min_sketchup do manifest. Dizer
@@ -235,6 +244,7 @@ begin
       WizardForm.FinishedLabel.Caption :=
         'o seu SketchUp é anterior a 2018. as ferramentas pedem SketchUp 2018 ou mais novo, então só as fontes foram instaladas.' + #13#10 + #13#10 +
         'atualize o SketchUp e rode este instalador de novo.' + #13#10 + #13#10 +
+        'pra ativar o cura upscaler no photoshop, siga o passo único da página do curso.' + #13#10 + #13#10 +
         'log: ' + LogPathCura
     else if ResultCodeCura = 2 then
       WizardForm.FinishedLabel.Caption :=

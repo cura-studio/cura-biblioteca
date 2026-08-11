@@ -13,7 +13,7 @@
     Usado com -Uninstall para pular a confirmação (modo não-interativo,
     usado pelo desinstalador gerado pelo Inno Setup).
 .PARAMETER BaseUrl
-    Origem dos arquivos (manifest.json, .rbz, fonts.zip). Por padrão aponta
+    Origem dos arquivos (manifest.json, .rbz, fonts.zip, photoshop.zip). Por padrão aponta
     para o release "latest" do GitHub. Aceita também um caminho local
     (pasta com os mesmos arquivos) para teste, ou a variável de ambiente
     CURA_BASE_URL (mesmo formato) quando -BaseUrl não for informado.
@@ -69,6 +69,16 @@ $script:UpdaterTaskName = "CURA Biblioteca Updater"
 # sai muito antes do bloco de fontes, então uma variável criada lá embaixo
 # chegaria $null na remoção.
 $script:FontsRegKey = "HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Fonts"
+# Pasta compartilhada do Cura Upscaler (Photoshop). NÃO é per-user de propósito:
+# o .atn que o aluno carrega no Photoshop tem este caminho CRAVADO dentro dele
+# (tools/make_photoshop.py, WIN_DIR), então tem que ser o mesmo pra qualquer
+# usuário da máquina. C:\Users\Public existe em todo Windows e é gravável sem
+# admin. Literal em vez de $env:PUBLIC: o .atn é estático e não tem como
+# acompanhar um perfil público movido de lugar. Se este caminho mudar, mudam
+# junto o WIN_DIR do make_photoshop.py, o PASTAS[] do
+# tools/instalar-cura-upscaler.jsx e o PHOTOSHOP_DIR do install.sh.
+$script:PhotoshopBaseDir = "C:\Users\Public\CURA-Biblioteca"
+$script:PhotoshopDir     = "C:\Users\Public\CURA-Biblioteca\photoshop"
 
 # --- TLS 1.2 + encoding do console (tem que vir antes de qualquer output) ---
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -177,7 +187,11 @@ function Get-CuraRemoteFile {
         [Parameter(Mandatory = $true)][string]$OutFile,
         [Parameter(Mandatory = $true)][string]$LogPath,
         [int]$Retries = 3,
-        [int]$TimeoutSec = 30
+        [int]$TimeoutSec = 30,
+        # chamado por um passo BÔNUS (cura upscaler): a falha é aviso, não erro.
+        # sem isso o aluno vê "erro /" em terracota por algo que, de propósito,
+        # nem derruba a instalação nem o exit code.
+        [switch]$AsWarning
     )
     $attempt = 0
     $lastMessage = ""
@@ -194,7 +208,11 @@ function Get-CuraRemoteFile {
             }
         }
     }
-    Write-CuraLog -LogPath $LogPath -Message "erro / falha definitiva ao baixar $Url : $lastMessage" -IsError
+    if ($AsWarning) {
+        Write-CuraLog -LogPath $LogPath -Message "aviso: falha definitiva ao baixar $Url : $lastMessage"
+    } else {
+        Write-CuraLog -LogPath $LogPath -Message "erro / falha definitiva ao baixar $Url : $lastMessage" -IsError
+    }
     return $false
 }
 
@@ -204,13 +222,19 @@ function Get-CuraAsset {
         [Parameter(Mandatory = $true)][string]$BaseUrl,
         [Parameter(Mandatory = $true)][string]$FileName,
         [Parameter(Mandatory = $true)][string]$OutFile,
-        [Parameter(Mandatory = $true)][string]$LogPath
+        [Parameter(Mandatory = $true)][string]$LogPath,
+        # ver Get-CuraRemoteFile: só o passo bônus do cura upscaler passa isso.
+        [switch]$AsWarning
     )
     $localBase = Resolve-CuraLocalPath -BaseUrl $BaseUrl
     if ($null -ne $localBase) {
         $sourcePath = Join-Path $localBase $FileName
         if (-not (Test-Path -LiteralPath $sourcePath)) {
-            Write-CuraLog -LogPath $LogPath -Message "erro / arquivo local não encontrado: $sourcePath" -IsError
+            if ($AsWarning) {
+                Write-CuraLog -LogPath $LogPath -Message "aviso: arquivo local não encontrado: $sourcePath"
+            } else {
+                Write-CuraLog -LogPath $LogPath -Message "erro / arquivo local não encontrado: $sourcePath" -IsError
+            }
             return $false
         }
         Copy-Item -LiteralPath $sourcePath -Destination $OutFile -Force
@@ -218,7 +242,7 @@ function Get-CuraAsset {
         return $true
     }
     $url = "$BaseUrl/$FileName"
-    return Get-CuraRemoteFile -Url $url -OutFile $OutFile -LogPath $LogPath
+    return Get-CuraRemoteFile -Url $url -OutFile $OutFile -LogPath $LogPath -AsWarning:$AsWarning
 }
 
 function Get-CuraPluginPayload {
@@ -375,6 +399,22 @@ function Wait-CuraSketchUpClosed {
     }
 }
 
+function Get-CuraPhotoshopSpec {
+    # Normaliza o bloco "photoshop" do manifest num unico lugar (o passo 8a e o
+    # no-op precisam da MESMA leitura). Devolve $null quando o bloco esta
+    # ausente OU vazio ("photoshop": {} , ou file/sha256 os dois vazios/null):
+    # os dois casos sao "etapa pulada em silencio", igual ao install.sh, que ve
+    # tudo isso como campo vazio. Bloco meio-preenchido volta com valid=$false
+    # pra virar AVISO la embaixo (nunca erro: o upscaler e bonus).
+    param($Manifest)
+    if ($null -eq $Manifest.photoshop) { return $null }
+    $f = "$($Manifest.photoshop.file)"
+    $s = "$($Manifest.photoshop.sha256)"
+    if ([string]::IsNullOrWhiteSpace($f) -and [string]::IsNullOrWhiteSpace($s)) { return $null }
+    $valid = (Test-CuraSafeLeafName -Name $f) -and ($s -match '^[0-9a-fA-F]{64}$')
+    return [PSCustomObject]@{ file = $f; sha256 = $s; valid = $valid }
+}
+
 function Test-CuraUpToDate {
     # Decide se dá pra pular a instalação inteira (no-op). Só quando NADA mudou:
     # mesma biblioteca_version no snapshot, toda versão do SketchUp detectada já
@@ -411,6 +451,28 @@ function Test-CuraUpToDate {
 
     foreach ($f in $OldSnapshot.fonts) {
         if (-not (Test-Path -LiteralPath $f.file)) { return $false }
+    }
+    # Cura upscaler: só entra na conta quando o manifest BAIXADO tem o bloco
+    # photoshop e ele é válido. Manifest velho (sem bloco) ou quebrado não pode
+    # furar o no-op por causa de arquivo que ele nem gerencia - senão toda
+    # rodada do updater reinstalaria a biblioteca inteira à toa.
+    $psSpecNoop = Get-CuraPhotoshopSpec -Manifest $Manifest
+    if (($null -ne $psSpecNoop) -and $psSpecNoop.valid) {
+        # o Where-Object não é decorativo: snapshot antigo SEM a propriedade
+        # photoshop (ou com ela null) vira @($null) - Count 1 com um elemento
+        # nulo, e o Test-Path abaixo receberia $null e cuspiria um erro vermelho
+        # cru no console do aluno. O retorno já estava certo (fura o no-op);
+        # o que sobrava era o barulho.
+        $psSnap = @(@($OldSnapshot.photoshop) | Where-Object { $null -ne $_ })
+        # Manifest COM bloco e snapshot SEM nenhum arquivo do upscaler: a etapa
+        # bônus nunca completou (download/escrita falhou numa rodada anterior -
+        # falha que, de propósito, não derruba a instalação nem segura a
+        # biblioteca_version). Fura o no-op pra tentar de novo: é este teste que
+        # transforma "bônus falhou hoje" em "bônus retentado amanhã".
+        if ($psSnap.Count -eq 0) { return $false }
+        foreach ($p in $psSnap) {
+            if (-not (Test-Path -LiteralPath $p.file)) { return $false }
+        }
     }
     return $true
 }
@@ -553,6 +615,16 @@ function Invoke-CuraUninstall {
     foreach ($f in $snap.fonts) {
         Write-Host "  - fonte: $($f.file)"
     }
+    foreach ($p in $snap.photoshop) {
+        Write-Host "  - photoshop: $($p.file)"
+    }
+    # a lista acima não deixa claro que os 3 arquivos do upscaler moram numa
+    # pasta da MÁQUINA (C:\Users\Public), não do perfil: quem confirma achando
+    # que remove "a minha instalação" tira o atalho F2 de todo mundo que usa
+    # este computador.
+    if (@($snap.photoshop).Count -gt 0) {
+        Write-Host "o cura upscaler é compartilhado - remover tira ele de todos os usuários deste computador."
+    }
 
     if (-not $Force) {
         $resp = Read-Host "confirma a remoção? (s/n)"
@@ -611,6 +683,45 @@ function Invoke-CuraUninstall {
         # estouraria aqui no meio da desinstalação.
         if (-not [string]::IsNullOrEmpty($f.reg_name)) {
             Remove-ItemProperty -Path $script:FontsRegKey -Name $f.reg_name -ErrorAction SilentlyContinue
+        }
+    }
+
+    # Cura Upscaler: mesma whitelist de prefixo das fontes, agora contra a pasta
+    # compartilhada. Ela é da BIBLIOTECA (só este instalador escreve lá), então
+    # o -Uninstall pode tirar o que registrou. Como a pasta é da máquina e não
+    # do perfil, isso remove o upscaler pra todos os usuários - decisão
+    # consciente: um .atn com caminho fixo não tem versão per-user, e deixar
+    # arquivo pra trás depois de "removida deste computador" seria pior.
+    # com a barra no fim de propósito: sem ela, "...\CURA-Biblioteca-outracoisa"
+    # passaria no StartsWith e viraria alvo de remoção.
+    $psDirUninstall = [System.IO.Path]::GetFullPath($script:PhotoshopDir).TrimEnd('\') + '\'
+    foreach ($p in $snap.photoshop) {
+        $psInsideExpectedDir = $false
+        try {
+            # ".." em qualquer posição reprova ANTES de qualquer normalização
+            # (paridade com is_allowed_removal_path do install.sh): o caminho vem
+            # do installed.json, que é arquivo em disco e pode estar adulterado,
+            # e não existe caso legítimo com ".." no snapshot.
+            if ("$($p.file)" -notmatch '\.\.') {
+                $resolvedPs = [System.IO.Path]::GetFullPath($p.file)
+                $psInsideExpectedDir = $resolvedPs.StartsWith($psDirUninstall, [StringComparison]::OrdinalIgnoreCase)
+            }
+        } catch {
+            $psInsideExpectedDir = $false
+        }
+        if (-not $psInsideExpectedDir) {
+            Write-CuraLog -LogPath $LogPath -Message "aviso: caminho do photoshop fora do diretório esperado, ignorado: $($p.file)"
+            continue
+        }
+        if (Test-Path -LiteralPath $p.file) {
+            Remove-Item -LiteralPath $p.file -Force -ErrorAction SilentlyContinue
+            Write-CuraLog -LogPath $LogPath -Message "cura upscaler removido: $($p.file)"
+        }
+    }
+    # as pastas saem só se ficaram vazias (outro usuário pode ter instalado).
+    foreach ($d in @($script:PhotoshopDir, $script:PhotoshopBaseDir)) {
+        if ((Test-Path -LiteralPath $d) -and (@(Get-ChildItem -LiteralPath $d -Force -ErrorAction SilentlyContinue).Count -eq 0)) {
+            Remove-Item -LiteralPath $d -Force -ErrorAction SilentlyContinue
         }
     }
 
@@ -1095,6 +1206,114 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wPa
             Write-CuraLog -LogPath $LogPath -Message "manifest ainda sem fontes definidas - etapa pulada."
         }
 
+        # --- 8a. Cura Upscaler (Photoshop) - BÔNUS. Três regras deste passo:
+        #   1. independe de SketchUp (igual às fontes) e independe do Photoshop
+        #      estar instalado: são 3 arquivos numa pasta compartilhada; quem
+        #      liga o atalho F2 é o aluno rodando o instalar-cura-upscaler.jsx;
+        #   2. NUNCA derruba a instalação NEM o exit code - download, sha256 ou
+        #      escrita que falham viram AVISO e mais nada (sem $hadErrors): a
+        #      biblioteca_version é gravada normalmente e o exit segue o que
+        #      plugins/fontes deram (sucesso puro = 0), então uma falha só do
+        #      bônus não abre mais o modal de erro do Inno (exit 2). O retry não
+        #      vem do $hadErrors e sim do no-op (Test-CuraUpToDate), que exige os
+        #      arquivos do upscaler no snapshot quando o manifest tem o bloco -
+        #      falhou hoje, a rodada de amanhã fura o no-op e tenta de novo. Por
+        #      isso o passo inteiro vive dentro de um try/catch, igual ao das
+        #      fontes: exceção aqui não pode subir pro catch global e pular a
+        #      gravação do snapshot;
+        #   3. manifest sem o bloco, ou com o bloco vazio (cache antigo de uma
+        #      release anterior) = etapa pulada em silêncio, sem apagar nada do
+        #      que já está lá.
+        $installedPhotoshop = @()
+        $psSpec = Get-CuraPhotoshopSpec -Manifest $manifest
+        if ($null -ne $psSpec) {
+            try {
+                $psFile = $psSpec.file
+                $psSha  = $psSpec.sha256
+                # validação pós-parse (espelha a do install.sh): bloco presente
+                # mas quebrado não vira instalação sem conferência de integridade.
+                if (-not $psSpec.valid) {
+                    Write-CuraLog -LogPath $LogPath -Message "aviso: bloco 'photoshop' do manifest inválido (file='$psFile', sha256='$psSha') - cura upscaler não instalado. o resto da biblioteca seguiu normal."
+                } else {
+                    $psZipDest = Join-Path $TempDir $psFile
+                    # -AsWarning: este passo é bônus e não derruba nada, então a
+                    # falha de download não pode sair em terracota de "erro /".
+                    $ok = Get-CuraAsset -BaseUrl $BaseUrl -FileName $psFile -OutFile $psZipDest -LogPath $LogPath -AsWarning
+                    if (-not $ok) {
+                        Write-CuraLog -LogPath $LogPath -Message "aviso: não deu pra baixar o cura upscaler ($psFile). o resto da biblioteca seguiu normal; o instalador tenta de novo sozinho mais tarde."
+                    } else {
+                        $psHash = (Get-FileHash -LiteralPath $psZipDest -Algorithm SHA256).Hash
+                        if ($psHash.ToLower() -ne $psSha.ToLower()) {
+                            Write-CuraLog -LogPath $LogPath -Message "aviso: sha256 não confere para $psFile. cura upscaler não instalado; o instalador tenta de novo sozinho mais tarde."
+                        } else {
+                            $psExtractDir = Join-Path $TempDir "photoshop-extract"
+                            New-Item -ItemType Directory -Path $psExtractDir -Force | Out-Null
+                            # ZipFile em vez de Expand-Archive pelo mesmo motivo
+                            # das fontes: sem semântica de glob no nome do arquivo.
+                            Add-Type -AssemblyName System.IO.Compression.FileSystem
+                            [System.IO.Compression.ZipFile]::ExtractToDirectory($psZipDest, $psExtractDir)
+
+                            New-Item -ItemType Directory -Path $script:PhotoshopDir -Force | Out-Null
+
+                            $psFalhou = $false
+                            foreach ($f in @(Get-ChildItem -LiteralPath $psExtractDir -Recurse -File)) {
+                                if (-not (Test-CuraSafeLeafName -Name $f.Name)) { continue }
+                                # try/catch por arquivo (padrão das fontes): um
+                                # arquivo travado/sem permissão não pode abortar
+                                # os outros dois.
+                                try {
+                                    $destPs = Join-Path $script:PhotoshopDir $f.Name
+                                    # remove antes de copiar: arquivo gravado por
+                                    # OUTRO usuário da máquina pode não ser
+                                    # sobrescrivível, e é isso que faz a segunda
+                                    # rodada ficar limpa em vez de meio-atualizada.
+                                    Remove-Item -LiteralPath $destPs -Force -ErrorAction SilentlyContinue
+                                    Copy-Item -LiteralPath $f.FullName -Destination $destPs -Force
+                                    $installedPhotoshop += [PSCustomObject]@{ file = $destPs }
+                                    Write-CuraLog -LogPath $LogPath -Message "cura upscaler: $destPs"
+                                } catch {
+                                    $psFalhou = $true
+                                    Write-CuraLog -LogPath $LogPath -Message "aviso: não consegui gravar $($f.Name) em $($script:PhotoshopDir): $($_.Exception.Message)"
+                                }
+                            }
+
+                            if ($psFalhou -or ($installedPhotoshop.Count -eq 0)) {
+                                Write-CuraLog -LogPath $LogPath -Message "aviso: cura upscaler não instalado por completo (sem permissão na pasta compartilhada?) - o resto da biblioteca seguiu normal."
+                            }
+                        }
+                    }
+                }
+            } catch {
+                Write-CuraLog -LogPath $LogPath -Message "aviso: falha ao preparar/instalar o cura upscaler: $($_.Exception.Message). o resto da biblioteca seguiu normal."
+            }
+        } else {
+            Write-CuraLog -LogPath $LogPath -Message "manifest sem o bloco photoshop (ou com o bloco vazio) - etapa pulada."
+        }
+
+        # --- 8a-bis. Cura upscaler que esta rodada NÃO gravou (etapa pulada, bloco
+        # ausente/vazio, download falho, arquivo travado): carrega as entradas do
+        # snapshot antigo pra frente, igual ao 8c das versões abaixo do mínimo.
+        # Sem isso, o snapshot é reescrito sem elas e os arquivos que continuam
+        # na pasta compartilhada viram órfãos eternos - invisíveis pro
+        # -Uninstall, que passaria a "remover" uma instalação deixando arquivo
+        # pra trás. É MERGE, não fallback: rodar só quando $installedPhotoshop
+        # está vazio perde as entradas antigas exatamente na instalação PARCIAL
+        # (1 dos 3 gravado, os outros 2 travados) - o caso em que mais tem
+        # órfão pra registrar. Só carrega o que AINDA existe em disco (outro
+        # usuário pode ter removido) e o que não foi gravado agora. ---
+        if (($null -ne $oldSnapshot) -and ($null -ne $oldSnapshot.photoshop)) {
+            $psPathsNovos = @($installedPhotoshop | ForEach-Object { $_.file })
+            foreach ($oldPs in @($oldSnapshot.photoshop)) {
+                if ($null -eq $oldPs) { continue }
+                if ([string]::IsNullOrEmpty($oldPs.file)) { continue }
+                if ($psPathsNovos -contains $oldPs.file) { continue }
+                if (Test-Path -LiteralPath $oldPs.file) {
+                    $installedPhotoshop += [PSCustomObject]@{ file = $oldPs.file }
+                    Write-CuraLog -LogPath $LogPath -Message "mantido no snapshot sem update (cura upscaler não reinstalado nesta rodada): $($oldPs.file)"
+                }
+            }
+        }
+
         # --- 8b. Fonte que saiu do payload: tira do disco e do registro. Sem
         # isso, fonte removida num release futuro ficaria pra sempre no
         # Photoshop do aluno E sumiria do snapshot (o -Uninstall nunca mais a
@@ -1179,6 +1398,7 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wPa
             installed_at       = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ssK")
             sketchup_versions  = $snapshotVersions
             fonts              = $installedFonts
+            photoshop          = $installedPhotoshop
         }
         # Escrita atômica: grava num .tmp e só substitui o snapshot real com
         # Move-Item -Force por cima - evita installed.json meio escrito se o
@@ -1203,6 +1423,13 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wPa
         Write-Host ""
         $fonteNoun  = if ($installedFonts.Count -eq 1) { "fonte" } else { "fontes" }
         $fonteVerbo = if ($installedFonts.Count -eq 1) { "instalada" } else { "instaladas" }
+        # O upscaler chega instalado mas ainda desligado: quem carrega o atalho
+        # F2 no Photoshop é o aluno, rodando o bootstrap uma vez. Sem esta
+        # frase, os 3 arquivos ficam na pasta compartilhada sem ninguém saber.
+        $psHint = ""
+        if ($installedPhotoshop.Count -gt 0) {
+            $psHint = "cura upscaler instalado: pra ligar o atalho F2, abra o Photoshop em Arquivo > Scripts > Procurar e escolha $($script:PhotoshopDir)\instalar-cura-upscaler.jsx (uma vez só)."
+        }
         if ($noSketchUpFound) {
             # 1 = não tem SketchUp nenhum; 3 = tem, mas é anterior ao
             # min_sketchup. Códigos diferentes porque o installer.iss escreve a
@@ -1226,6 +1453,7 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wPa
                 }
                 Write-Host "instale o SketchUp e rode este instalador novamente para concluir a instalação dos plugins."
             }
+            if ($psHint) { Write-Host $psHint }
             Write-Host "log: $LogPath"
             exit $exitSemSketchUp
         }
@@ -1249,6 +1477,7 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wPa
         if ($hadErrors) {
             Write-Host $msg
             Write-Host "algum item falhou (download, integridade ou fonte em uso) - veja o log para detalhes."
+            if ($psHint) { Write-Host $psHint }
             Write-Host "log: $LogPath"
             exit 2
         }
@@ -1258,6 +1487,7 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wPa
         if ($installedFonts.Count -gt 0) {
             Write-Host "se alguma fonte não aparecer no seu programa, feche e abra o programa (ou faça logoff e login)."
         }
+        if ($psHint) { Write-Host $psHint }
         if ($mantidosAbaixoDoMinimo.Count -gt 0) {
             Write-Host "o cura | ferramentas continua instalado no seu SketchUp $($mantidosAbaixoDoMinimo -join ', '), mas não recebe mais atualização - a partir desta versão pedimos o $($manifest.min_sketchup). pra tirar, use o desinstalador."
         }

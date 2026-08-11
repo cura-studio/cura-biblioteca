@@ -2,3 +2,6 @@
 __pycache__
 *.log
 Output/
+# pesquisa local do formato .atn (Photoshop): .atn de terceiros e headers do SDK
+# ficam fora deste repo, que e PUBLICO.
+tools/_atn-research/

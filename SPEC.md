@@ -13,8 +13,12 @@ Aluno
 
 GitHub repo joaotegoni/cura-biblioteca (público)
  └─ Release "latest" assets:
-    manifest.json, cura-ferramentas.rbz, fonts.zip, install.ps1, install.sh, BibliotecaCURA-Setup.exe
+    manifest.json, cura-ferramentas.rbz, fonts.zip, photoshop.zip, CuraUpscaler.jsx,
+    install.ps1, install.sh, BibliotecaCURA-Setup.exe
 ```
+
+`photoshop.zip` = payload do **cura upscaler** (Photoshop): os 3 arquivos que o instalador grava na pasta compartilhada (`CuraUpscaler.jsx`, `instalar-cura-upscaler.jsx`, `cura-upscaler.atn`). Gerado por `tools/make_photoshop.py`.
+`CuraUpscaler.jsx` solto = link de **resgate manual** da página do curso; nenhum instalador busca ele. É byte-idêntico ao que está dentro do `photoshop.zip` — o gate do CI quebra a release se divergirem (link de resgate stale).
 
 URLs canônicas:
 - BASE = `https://github.com/joaotegoni/cura-biblioteca/releases/latest/download`
@@ -26,7 +30,7 @@ URLs canônicas:
 ```json
 {
   "schema": 1,
-  "biblioteca_version": "9.2.0",
+  "biblioteca_version": "10.0.0",
   "min_sketchup": 2018,
   "plugins": [
     {
@@ -40,16 +44,18 @@ URLs canônicas:
     }
   ],
   "fonts": { "file": "fonts.zip", "url": null, "sha256": "<idem>" },
+  "photoshop": { "file": "photoshop.zip", "url": null, "sha256": "<idem>" },
   "remove": []
 }
 ```
 
 Regras:
-- `url: null` → download de `BASE/<file>`. URL absoluta → usa ela (futuro: endpoint autenticado assinatura — NÃO implementar auth agora, só suportar URL absoluta). Implementado só em `plugins[]` (install.sh `fetch_absolute_url`, install.ps1 `Get-CuraRemoteFile`). Em `fonts` o campo existe no schema mas é RESERVADO: nenhum dos dois instaladores lê — fonts.zip sempre vem do asset da release.
+- `url: null` → download de `BASE/<file>`. URL absoluta → usa ela (futuro: endpoint autenticado assinatura — NÃO implementar auth agora, só suportar URL absoluta). Implementado só em `plugins[]` (install.sh `fetch_absolute_url`, install.ps1 `Get-CuraRemoteFile`). Em `fonts` **e em `photoshop`** o campo existe no schema mas é RESERVADO: nenhum dos dois instaladores lê — `fonts.zip` e `photoshop.zip` sempre vêm do asset da release.
 - `biblioteca_version` = versão da biblioteca inteira e ÚNICO critério de no-op do auto-update (install.sh e `Test-CuraUpToDate` no ps1 saem sem fazer nada se ela não mudou). Manual, e tem que casar com a tag sem o `v` — o CI recusa a release se divergir.
 - `plugins[].version` = a constante `VERSION` de dentro do .rbz; é o que o updater in-plugin compara pra decidir o banner de atualização. Manual, conferido por `make_manifest.py` contra o zip.
 - `roots` = entradas raiz que o .rbz cria em Plugins/ → snapshot de desinstalação + limpeza de versão velha do próprio plugin antes de instalar. Conferido por `make_manifest.py` contra o zip.
 - `fonts: null` → pula fontes SEM erro. Hoje as fontes existem: `payload/fonts.zip` é gerado por `tools/make_fonts.py` (allowlist das 5 clássicas + `--google` inteiro) e traz um `names.json` com o nome de registro de cada arquivo pro Windows.
+- `photoshop: null` (ou bloco ausente, ou `{}`) → pula o cura upscaler SEM erro. Hoje o bloco existe: `payload/photoshop.zip` é gerado por `tools/make_photoshop.py`. Bloco presente mas quebrado (sem `file`, sha256 fora do formato) = AVISO e etapa pulada, nunca erro — é bônus.
 - `remove` = SÓ match exato de nome (arquivo ou pasta) dentro de cada `Plugins/`. NUNCA glob/wildcard. Hoje VAZIA: a lista das TT_* saiu porque tirava dependência de plugin pago do aluno (TT_Lib2 sustenta Solid Inspector², Vertex Tools, QuadFace Tools) numa execução silenciosa do auto-update. Nome novo aqui só entra com o mesmo cuidado do "limpar sketchup": o que sai do `Plugins/` vai pro porão de recuperação (`Documentos/cura-plugins-removidos/<data-hora>/SketchUp <ano>/`), nunca é apagado.
 - REGRA OPERACIONAL: renomeou um root de plugin, ou tirou um plugin do manifest? o nome ANTIGO entra na lista `remove` no MESMO release. A limpeza de upgrade só remove roots do plugin que vai ser reinstalado com sucesso (proteção contra download corrompido apagar cópia boa), então root antigo órfão só sai do disco via `remove`.
 - sha256 SEMPRE verificado pós-download. Falhou → aborta item com msg clara, não instala corrompido.
@@ -68,9 +74,15 @@ Regras:
 8. Fontes (se manifest tiver): unzip fonts.zip; instala .ttf/.otf/.ttc per-user:
    - Mac: copia p/ `~/Library/Fonts/`
    - Win: copia p/ `%LOCALAPPDATA%\Microsoft\Windows\Fonts\` (criar dir) + registra valor em `HKCU\Software\Microsoft\Windows NT\CurrentVersion\Fonts`: nome = "<basename> (TrueType)", dado = path completo. Sem admin.
+8b. **Cura upscaler (Photoshop) — BÔNUS.** Se o manifest tiver bloco `photoshop`: baixa `photoshop.zip` → sha256 → unzip → grava os 3 arquivos numa pasta COMPARTILHADA da máquina (não do perfil — o `.atn` tem o caminho cravado dentro dele):
+   - Mac: `/Users/Shared/CURA-Biblioteca/photoshop/` — pastas `777` (sem sticky), arquivos `644`. `777` e não `775` porque `/Users/Shared` nasce com grupo `wheel`: com `775` o SEGUNDO usuário do mac não grava. `rm` antes do `cp` (arquivo 644 de outro usuário não é sobrescrivível, mas é removível na pasta 777).
+   - **Risco aceito (0777 sem sticky):** pasta `0777` sem sticky significa que qualquer usuário ou processo local da máquina pode trocar o `CuraUpscaler.jsx` que o F2 executa. É decisão de projeto, não descuido: o caminho é fixo e não pode pedir admin, `775` morre no grupo `wheel` do `/Users/Shared`, o sticky bit mata o `rm` cross-user e per-user quebraria o `.atn` estático (que tem o caminho cravado dentro).
+   - Win: `C:\Users\Public\CURA-Biblioteca\photoshop\`.
+   Independe de SketchUp e de o Photoshop estar instalado. **Nunca derruba a instalação nem o exit code**: download/sha/escrita que falham viram AVISO puro (sem `HAD_ERROR`/`$hadErrors`), a `biblioteca_version` é gravada normal e o exit segue o resto (sucesso puro = 0; no Windows isso evita o modal de erro do Inno por falha só do bônus). O retry vem do no-op: com bloco `photoshop` VÁLIDO no manifest baixado, o no-op exige arquivo do upscaler no snapshot e todos em disco — falhou hoje, a rodada de amanhã fura o no-op e tenta de novo. Manifest sem o bloco (ou com bloco vazio/quebrado) NÃO fura o no-op e não apaga nada. Quem liga o atalho F2 é o aluno, rodando `instalar-cura-upscaler.jsx` uma vez (Photoshop > Arquivo > Scripts > Procurar) — a instrução sai no resumo do terminal e, no Windows, no `FinishedLabel` do Inno.
 9. Snapshot JSON (p/ desinstalar): lista exata do que instalou (por versão SketchUp: paths dos roots; fontes: paths; versão biblioteca; data ISO).
    - Mac: `~/Library/Application Support/CURA-Biblioteca/installed.json`
    - Win: `%LOCALAPPDATA%\CURA-Biblioteca\installed.json`
+   - Os 3 arquivos do upscaler entram no snapshot como qualquer outro item. Rodada que NÃO instalou o upscaler (etapa pulada/falha) carrega pra frente as entradas da rodada anterior que ainda existem em disco — senão viram órfão eterno, invisível pro `--uninstall`.
 10. Log completo (tudo que fez, timestamps): mesmo dir, `install.log` (append, header com data). Aluno manda esse arquivo pro suporte.
 11. Resumo final PT-BR, sem emoji: "ok / instalado: cura | ferramentas v1.0.0 em N versões do SketchUp (2021, 2025); X fontes. log: <path>". Instrui abrir SketchUp > Extensões pra conferir.
 
@@ -89,7 +101,7 @@ Isso é uma camada. A outra é o updater DENTRO do plugin (`cura_ferramentas/cor
 
 ## Desinstalação — "explicando cada um"
 
-Modo `--uninstall` (sh) / `-Uninstall` (ps1): lê snapshot → imprime lista item a item (plugin X na versão Y, fonte Z) → confirma → remove SÓ o que está no snapshot → remove snapshot → resumo. Sem snapshot → msg "nada instalado por este instalador". Windows: exe Inno registra "Biblioteca CURA" em Adicionar/Remover; desinstalador chama o ps1 cacheado com -Uninstall (funciona offline → cachear install.ps1 em `%LOCALAPPDATA%\CURA-Biblioteca\` na instalação).
+Modo `--uninstall` (sh) / `-Uninstall` (ps1): lê snapshot → imprime lista item a item (plugin X na versão Y, fonte Z, arquivo do cura upscaler) → se houver item do upscaler, uma linha a mais avisando que a pasta é da MÁQUINA ("o cura upscaler é compartilhado — remover tira ele de todos os usuários deste computador") → confirma → remove SÓ o que está no snapshot (whitelist de caminho permitido, que reprova qualquer path com `..`) → remove snapshot → resumo. Sem snapshot → msg "nada instalado por este instalador". Windows: exe Inno registra "Biblioteca CURA" em Adicionar/Remover; desinstalador chama o ps1 cacheado com -Uninstall (funciona offline → cachear install.ps1 em `%LOCALAPPDATA%\CURA-Biblioteca\` na instalação).
 
 ## Arquivos a produzir
 
@@ -97,14 +109,15 @@ Modo `--uninstall` (sh) / `-Uninstall` (ps1): lê snapshot → imprime lista ite
 - `scripts/install.sh` — bash **3.2-compatível** (macOS ships 3.2: SEM assoc array, SEM mapfile, SEM ${var,,}). `set -euo pipefail`. `mktemp -d` + `trap cleanup EXIT`. Paths SEMPRE quoted (espaços). curl `-fsSL --retry 3 --connect-timeout 30`. sha256: `shasum -a 256`. unzip: `unzip -oq`. Suporta `--uninstall`, `--quiet`, `--limpar` e `CURA_BASE_URL` (se começa com `/` ou `file://`, copia local em vez de curl). Confirmações: `read -r` de `/dev/tty` (script vem de pipe! stdin ocupado — OBRIGATÓRIO /dev/tty p/ prompts).
 - `manifest.json` — como schema acima, sha256 real do payload/cura-ferramentas.rbz.
 - `tools/make_manifest.py` — python3 stdlib puro (pathlib, hashlib, json, zipfile, re): recalcula sha256 de payload/* e reescreve só esse campo no manifest.json. Uso: CI e manutenção. Não bumpa versão nenhuma — versão é manual —, mas CONFERE, com erro fatal (SystemExit 1): `roots` e `plugins[].version` contra o conteúdo real do .rbz.
+- `tools/make_photoshop.py` — monta `payload/photoshop.zip` (python3 stdlib puro) com os 3 arquivos do cura upscaler: `CuraUpscaler.jsx` (o script), `tools/instalar-cura-upscaler.jsx` (bootstrap que o aluno roda uma vez pra ligar o F2) e `cura-upscaler.atn` (action com o atalho, com o caminho da pasta compartilhada CRAVADO dentro — mudou o caminho, mudam junto `PHOTOSHOP_DIR` do install.sh, `$script:PhotoshopDir` do install.ps1 e o `PASTAS[]` do bootstrap). Também copia o `CuraUpscaler.jsx` solto pra `payload/` (link de resgate da página do curso) — os dois TÊM que ser byte-idênticos, o CI confere.
 - `tools/make_fonts.py` — monta `payload/fonts.zip` (fontTools, dependência só de build): allowlist das 5 clássicas no argumento posicional, `--google <pasta>` entra inteiro; curadoria pela família da name table; família com 3+ arquivos vira `.ttc`, com 1 ou 2 fica como veio; gera `names.json` com o nome de registro de cada arquivo pro Windows.
 
 ### Efetor B (Windows + CI + docs)
 - `scripts/install.ps1` — **PowerShell 5.1** (Win10 default; nada de sintaxe pwsh7). Início: `[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12`. Download: `Invoke-WebRequest -UseBasicParsing`. Hash: `Get-FileHash -Algorithm SHA256`. **Expand-Archive exige extensão .zip** → copiar .rbz p/ temp como .zip antes. Param: `[switch]$Uninstall`, `[switch]$Force`, `[switch]$Quiet`, `[switch]$Limpar`, `$BaseUrl` (default BASE; aceita path local p/ teste, ou `CURA_BASE_URL`). Saída console PT-BR SEM acento quebrado: console 5.1 usa codepage legada → `[Console]::OutputEncoding = [Text.Encoding]::UTF8` no início e salvar .ps1 **UTF-8 com BOM** (5.1 lê BOM; sem BOM = mojibake).
 - `windows/installer.iss` — Inno Setup 6. `PrivilegesRequired=lowest`, `Languages: BrazilianPortuguese` (compiler:Languages\BrazilianPortuguese.isl), AppId GUID fixo (gerar 1× e cravar), AppName "Biblioteca CURA", DefaultDirName `{localappdata}\CURA-Biblioteca` (só cache/log — plugins vão pro %APPDATA% do SketchUp via ps1). Embute SÓ `scripts/install.ps1` como fallback ([Files]). [Code]: no install, tenta baixar install.ps1 mais novo de BASE (ITD não — usar `WinHttp.WinHttpRequest.5.1` COM em Pascal ou simplesmente rodar powershell que baixa); falhou download → usa o embutido (offline-tolerante na lógica, payload sempre exige internet). Executa `powershell.exe -NoProfile -ExecutionPolicy Bypass -File <cached>\install.ps1` visível (aluno vê progresso), captura exit code → mensagem final. [UninstallRun]: `powershell ... -File <cached>\install.ps1 -Uninstall -Confirm:$false` + Inno remove cache/log. Wizard mínimo: welcome → progress → finished (texto resumo + checkbox "ver log").
 - `windows/cura.ico` — gerar via python3+PIL de `~/dev/cura-ferramentas/src/cura_ferramentas/core/assets/` (buscar cura-marca-*-512.png; se não achar, `find ~/dev/cura-ferramentas -name "*512*.png"`). Tamanhos 16/32/48/256 no .ico. PIL disponível no python3 local.
-- `.github/workflows/release.yml` — trigger `push: tags: ['v*']`. Job 1 (ubuntu): roda `tools/make_manifest.py` (garante sha256 atual) + **gate de versão**, sobe artifacts. Job 2 (windows-latest): `choco install innosetup -y`, `iscc windows\installer.iss`, exe → artifact. Job 3: `softprops/action-gh-release@v2` anexa: exe, payload/cura-ferramentas.rbz, payload/fonts.zip, manifest.json, scripts/install.sh, scripts/install.ps1, com `fail_on_unmatched_files: true` (os 6 são obrigatórios: faltar um publica release verde e quebrada) e `prerelease: contains(github.ref_name, '-')`.
-  - Gate de versão (falha o job com `::error::`): tag sem o `v` e sem o sufixo tem que ser igual a `biblioteca_version` (senão o parque inteiro faz no-op e ninguém recebe a release); `plugins[0].version` tem que ser igual à `VERSION` dentro do .rbz e à `CURA_UI_VERSION` do shell.html. Sufixo de tag só é aceito na forma `-rcN` (aviso amarelo, sai como prerelease invisível pro parque, serve pra teste); qualquer outro hífen (`-beta`, `-final`) é erro duro — é o jeito mais fácil de publicar uma release que ninguém recebe.
+- `.github/workflows/release.yml` — trigger `push: tags: ['v*']`. Job 1 (ubuntu): roda `tools/make_manifest.py` (garante sha256 atual) + **gate de versão**, sobe artifacts. Job 2 (windows-latest): `choco install innosetup -y`, `iscc windows\installer.iss`, exe → artifact. Job 3: `softprops/action-gh-release@v2` anexa: exe, payload/cura-ferramentas.rbz, payload/fonts.zip, payload/photoshop.zip, payload/CuraUpscaler.jsx, manifest.json, scripts/install.sh, scripts/install.ps1, com `fail_on_unmatched_files: true` (os 8 são obrigatórios: faltar um publica release verde e quebrada) e `prerelease: contains(github.ref_name, '-')`.
+  - Gate de versão (falha o job com `::error::`): tag sem o `v` e sem o sufixo tem que ser igual a `biblioteca_version` (senão o parque inteiro faz no-op e ninguém recebe a release); `plugins[0].version` tem que ser igual à `VERSION` dentro do .rbz e à `CURA_UI_VERSION` do shell.html; e o `payload/CuraUpscaler.jsx` solto tem que ser byte-idêntico (sha256) ao `CuraUpscaler.jsx` de dentro do `payload/photoshop.zip` — divergiu, o link de resgate da página do curso ficaria stale e o aluno baixaria script diferente do instalado. Sufixo de tag só é aceito na forma `-rcN` (aviso amarelo, sai como prerelease invisível pro parque, serve pra teste); qualquer outro hífen (`-beta`, `-final`) é erro duro — é o jeito mais fácil de publicar uma release que ninguém recebe.
 - `README.md` — PT-BR normal (aluno lê): seção aluno (Windows: baixar exe, SmartScreen "Saiba mais > Executar assim mesmo" enquanto sem assinatura; Mac: colar 1 linha no Terminal), seção **publicar uma versão** (runbook: os 3 números manuais, a armadilha do hífen, o `curl -sI` de conferência depois de publicar), seção **reverter (kill switch)** (ir pra frente > flip pra pre-release + apagar a tag remota, com o aviso de que o rollback roda instalação de verdade na máquina do aluno), seção futuro (assinatura de código Win/Mac = slots prontos; plugin por assinatura = trocar `url` no manifest p/ endpoint autenticado).
 
 ## Identidade visual CURA (obrigatória em TUDO user-facing)

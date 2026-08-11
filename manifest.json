@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "biblioteca_version": "9.2.0",
+  "biblioteca_version": "10.0.0",
   "min_sketchup": 2018,
   "plugins": [
     {
@@ -20,6 +20,11 @@
     "file": "fonts.zip",
     "url": null,
     "sha256": "c11dcaadd30ae0aa818f9bde6e1b3ecc12097af985736b87247d977d19a5fb79"
+  },
+  "photoshop": {
+    "file": "photoshop.zip",
+    "url": null,
+    "sha256": "4111e00330da8d43b42732a28bdfdd65d534d0d737c44edd68ab4d55399a52b9"
   },
   "remove": []
 }

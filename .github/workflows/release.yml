@@ -28,7 +28,7 @@ jobs:
       # em "ja esta atualizada" (biblioteca_version e o unico criterio de
       # no-op) e ninguem baixa nada; manifest.plugins[0].version != VERSION do
       # rbz deixa banner de update permanente que reinstalar nunca limpa.
-      - name: gate de versao (tag == biblioteca_version, manifest == rbz)
+      - name: gate de versao (tag == biblioteca_version, manifest == rbz, jsx solto == jsx do zip)
         run: |
           set -euo pipefail
           # v9.2.0 -> BASE=9.2.0 SUFFIX=""; v9.2.0-rc1 -> BASE=9.2.0 SUFFIX=rc1
@@ -58,6 +58,19 @@ jobs:
           [ "$BASE" = "$MAN" ] || { echo "::error::tag $BASE != biblioteca_version $MAN do manifest — o parque inteiro faria no-op (no-op do snapshot no install.sh / Test-CuraUpToDate no install.ps1) e ninguem receberia esta release"; exit 1; }
           [ "$PLG" = "$RBZ" ] || { echo "::error::manifest plugins[0].version $PLG != VERSION $RBZ dentro do rbz — banner de update permanente no plugin (core/updater.rb)"; exit 1; }
           [ "$UI" = "$RBZ" ] || { echo "::error::CURA_UI_VERSION $UI != VERSION $RBZ — rbz nao saiu do build.sh"; exit 1; }
+          # 4o numero que ninguem ve divergir: o CuraUpscaler.jsx sai em DOIS
+          # lugares — solto (link de resgate manual da pagina do curso,
+          # /releases/latest/download/CuraUpscaler.jsx) e dentro do
+          # payload/photoshop.zip (o que os instaladores gravam na pasta
+          # compartilhada). Regerar so um dos dois publica release verde com o
+          # link de resgate STALE: o aluno que baixa pela pagina fica com um
+          # script diferente do que a biblioteca instalou, e nada avisa.
+          JSX_SOLTO=$(sha256sum payload/CuraUpscaler.jsx | awk '{print $1}')
+          JSX_VAZIO=$(printf '' | sha256sum | awk '{print $1}')
+          JSX_ZIP=$(unzip -p payload/photoshop.zip CuraUpscaler.jsx 2>/dev/null | sha256sum | awk '{print $1}') || JSX_ZIP="$JSX_VAZIO"
+          echo "jsx_solto=$JSX_SOLTO jsx_no_zip=$JSX_ZIP"
+          [ "$JSX_ZIP" != "$JSX_VAZIO" ] || { echo "::error::nao achei CuraUpscaler.jsx dentro de payload/photoshop.zip — o zip nao saiu do tools/make_photoshop.py"; exit 1; }
+          [ "$JSX_SOLTO" = "$JSX_ZIP" ] || { echo "::error::payload/CuraUpscaler.jsx ($JSX_SOLTO) != CuraUpscaler.jsx dentro do payload/photoshop.zip ($JSX_ZIP) — o link de resgate da pagina do curso ficaria stale (aluno baixaria um script diferente do instalado). rode tools/make_photoshop.py e versione os dois."; exit 1; }
 
       - name: sobe manifest.json atualizado
         uses: actions/upload-artifact@v4
@@ -118,11 +131,19 @@ jobs:
       - name: publica release
         uses: softprops/action-gh-release@v2
         with:
-          # os 6 assets sao todos obrigatorios (todos buscados por URL em
-          # runtime): faltar um publica release verde e quebrada — sem
-          # fonts.zip todo instalador loga erro, grava a biblioteca_version
-          # ANTIGA no snapshot e re-tenta todo dia; sem install.sh a linha do
-          # Terminal do mac vira 404.
+          # os 8 assets sao todos obrigatorios: faltar um publica release verde
+          # e quebrada — sem fonts.zip todo instalador loga erro, grava a
+          # biblioteca_version ANTIGA no snapshot e re-tenta todo dia; sem
+          # install.sh a linha do Terminal do mac vira 404.
+          # Os dois novos desta release:
+          #   - payload/photoshop.zip: buscado por URL em runtime (bloco
+          #     "photoshop" do manifest), igual ao fonts.zip. Falta dele = mesmo
+          #     estrago do fonts.zip, so que no bloco bonus (o instalador avisa,
+          #     segue com plugin/fontes e re-tenta todo dia).
+          #   - payload/CuraUpscaler.jsx: NAO e buscado por instalador nenhum —
+          #     e o link de resgate manual da pagina do curso, pro aluno que so
+          #     quer o .jsx solto. Entra aqui pra existir uma URL estavel
+          #     (/releases/latest/download/CuraUpscaler.jsx) por release.
           fail_on_unmatched_files: true
           # tags com sufixo (ex: v9.1.0-rc1, v9.1.0-beta) viram prerelease e
           # nunca /releases/latest/download - só release cheia (vX.Y.Z) vira
@@ -132,6 +153,8 @@ jobs:
             windows/Output/BibliotecaCURA-Setup.exe
             payload/cura-ferramentas.rbz
             payload/fonts.zip
+            payload/photoshop.zip
+            payload/CuraUpscaler.jsx
             manifest.json
             scripts/install.sh
             scripts/install.ps1
