@@ -68,23 +68,21 @@ Pede confirmação e não roda em modo silencioso.
 
 ## fontes
 
-`payload/fonts.zip` é gerado por `tools/make_fonts.py` (precisa de `fonttools`, só em build). O default é o **pacote completo** — clássicas e Google no mesmo zip, que é o que o instalador entrega hoje:
+`payload/fonts.zip` é gerado por `tools/make_fonts.py` (precisa de `fonttools`, só em build). Desde a decisão do João de 2026-08-26, o default é o **split**: o zip público (`--out`, `payload/fonts.zip`) leva só as famílias **livres** (OFL); as 5 clássicas (Helvetica Neue, Futura, Avant Garde, Garamond, Minion — Adobe/Linotype, licença comprada, sem direito de redistribuição pública) ficam **fora**, porque `payload/fonts.zip` é asset de release de um repositório **público** — qualquer um baixa com `curl`, sem login e sem Hotmart.
 
 ```
 python3 tools/make_fonts.py <pasta-das-classicas> --google <pasta-das-google-fonts>
 python3 tools/make_manifest.py
 ```
 
-São duas pastas: o argumento posicional passa pela allowlist das 5 clássicas (helvetica neue, futura, avant garde, garamond, minion) e o `--google` entra inteiro. Esquecer o `--google` regera um `fonts.zip` com metade das famílias e ninguém percebe — o sha256 muda e o CI publica normal. O zip atual tem 22 arquivos de fonte (os 5 `.ttc` clássicos + `poppins.ttc` + 16 `.ttf` variáveis do Google), mais o `names.json` e a pasta `licencas/` com as 10 OFL.
+São duas pastas: o argumento posicional passa pela allowlist das 5 clássicas (helvetica neue, futura, avant garde, garamond, minion) e o `--google` entra inteiro — mesmo sem `--out-classicas`, a pasta das clássicas continua obrigatória (é ela que decide o que **não** entra no zip público). Esquecer o `--google` regera um `fonts.zip` com metade das famílias e ninguém percebe — o sha256 muda e o CI publica normal. Sem `--out-classicas`, o comando acima só avisa no terminal quais famílias ficaram de fora e imprime o comando pronto pra gerar o zip privado — nunca gera o zip das clássicas sozinho. O zip público atual tem 17 arquivos de fonte (`poppins.ttc` + 16 `.ttf` variáveis do Google), mais o `names.json` e a pasta `licencas/` com as 10 OFL.
 
-Passar `--out-classicas` liga o **modo split**: o zip de `--out` fica só com as famílias livres (OFL) e as clássicas vão pra um zip à parte, pro mesmo canal privado das texturas/HDRIs.
+Passe `--out-classicas` pra gerar também o zip privado, na mesma rodada: o zip de `--out` continua só com as livres, e as clássicas vão pro zip separado, pro mesmo canal privado das texturas/HDRIs (nunca sobe pro GitHub nem pro release).
 
 ```
 python3 tools/make_fonts.py <pasta-das-classicas> --google <pasta-das-google-fonts> \
-  --out payload/fonts-livres.zip --out-classicas ~/entrega/fontes-classicas.zip
+  --out payload/fonts.zip --out-classicas ~/entrega/fontes-classicas.zip
 ```
-
-O split existe porque `payload/fonts.zip` é asset de release de um repositório **público**: qualquer um baixa com um `curl`, sem login e sem Hotmart, e as clássicas são Adobe/Linotype com "all rights reserved" dentro do próprio binário. Enquanto essa decisão de licenciamento não fecha, o default é o pacote completo — e o build imprime um aviso a cada rodada lembrando disso.
 
 Ele faz a curadoria pela família tipográfica declarada dentro do arquivo (nome de arquivo mente, name table não). Família com 3 ou mais arquivos vira um único `.ttc`; com 1 ou 2 arquivos fica como o fabricante entregou. E gera o `names.json` que o `install.ps1` usa pra registrar a fonte no Windows. Sem esse `names.json`, o Windows só expõe a primeira face de cada `.ttc`.
 

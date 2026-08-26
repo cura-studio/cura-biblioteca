@@ -10,23 +10,26 @@ O que faz:
   3. gera names.json com o nome de registro do Windows de cada arquivo — o
      Windows exige TODAS as faces da colecao separadas por " & ", senao so a
      primeira aparece no Photoshop/InDesign/Illustrator;
-  4. empacota tudo (classicas + familias LIVRES do Google/OFL) num zip so, em
-     payload/fonts.zip, junto das licencas OFL — e o DEFAULT, decidido com o
-     Joao em 06/08/2026: o aluno recebe um pacote de fontes, nao dois;
-  5. so quando --out-classicas e passado, separa: --out fica so com as livres e
-     as CLASSICAS (Adobe/Linotype, licenca comprada) vao pro zip de
-     --out-classicas, que NAO sobe pro GitHub (o repo e publico e o asset de
-     release baixa sem autenticacao) — entrega pelo canal privado das
-     texturas/HDRIs. Modo pendente da decisao de licenciamento do Joao.
+  4. por DEFAULT faz o SPLIT (decisao Joao 2026-08-26): --out leva so as
+     familias LIVRES do Google/OFL + as licencas OFL; as CLASSICAS ficam FORA
+     — payload/fonts.zip e asset de release de um repo PUBLICO, qualquer um
+     baixa com curl sem login/Hotmart, entao "pacote completo no zip publico"
+     morreu como default. Sem --out-classicas o script so avisa (lista as
+     familias puladas + o comando pronto pra gerar o zip privado);
+  5. pra gerar o zip das CLASSICAS (Adobe/Linotype, licenca comprada), passe
+     --out-classicas: elas saem do zip de --out e vao pro zip de
+     --out-classicas, que NAO sobe pro GitHub — entrega pelo canal privado das
+     texturas/HDRIs.
 
 Uso:
-    # default: pacote completo num zip so
+    # default: split. --out fica so com as livres; classicas ficam de fora
+    # (o script avisa e sugere o comando --out-classicas)
     python3 tools/make_fonts.py <pasta-classicas> --google <pasta-google> \
         [--out payload/fonts.zip]
 
-    # opcional: split publico (livres) / privado (classicas)
+    # gerar tambem o zip privado das classicas
     python3 tools/make_fonts.py <pasta-classicas> --google <pasta-google> \
-        --out payload/fonts-livres.zip --out-classicas ~/entrega/fontes-classicas.zip
+        --out payload/fonts.zip --out-classicas ~/entrega/fontes-classicas.zip
 
 Precisa de fontTools (dependencia SO de build, nunca de instalacao):
     pip install fonttools
@@ -244,8 +247,8 @@ def main():
     ap.add_argument("--licencas", help="pasta com os OFL.txt das familias Google "
                                        "(default: <google>/licencas)")
     ap.add_argument("--out", default="payload/fonts.zip",
-                    help="zip do release. Sem --out-classicas leva o pacote "
-                         "COMPLETO (classicas + livres); com ele, so as livres")
+                    help="zip do release, so com as familias LIVRES (Google/OFL). "
+                         "As classicas nunca entram aqui — use --out-classicas")
     ap.add_argument("--out-classicas",
                     help="separa as classicas licenciadas neste zip, pro canal "
                          "privado — e tira elas do zip de --out")
@@ -259,18 +262,11 @@ def main():
         livres, d = curar(args.google, so_allowlist=False)
         descartes += d
 
-    # sem --out-classicas as classicas viajam JUNTO no zip de --out (pacote
-    # completo, um so). payload/fonts.zip e asset de release de um repo PUBLICO
-    # — qualquer um baixa com um curl, sem login e sem Hotmart —, entao esse
-    # modo expoe fonte Adobe/Linotype com "all rights reserved" no binario: e
-    # exatamente a decisao de licenciamento que ainda esta aberta com o Joao.
+    # as classicas NUNCA entram no zip de --out (payload/fonts.zip e asset de
+    # release de um repo PUBLICO — qualquer um baixa com curl, sem login e sem
+    # Hotmart). --out-classicas so decide se o zip PRIVADO delas e gerado
+    # nesta rodada; --out fica sempre so com as livres.
     saida = dict(livres)
-    if not args.out_classicas:
-        for slug, itens in classicas.items():
-            if slug in saida:
-                sys.exit(f"colisao de slug {slug!r} entre a pasta do Google e a allowlist "
-                         f"das classicas — as duas familias virariam um arquivo so")
-            saida[slug] = itens
 
     if saida:
         licencas = args.licencas or (os.path.join(args.google, "licencas") if args.google else None)
@@ -280,9 +276,6 @@ def main():
             print("AVISO: sem pasta de licencas. A OFL 1.1 exige que a copia da licenca "
                   "acompanhe a fonte — baixe ofl/<familia>/OFL.txt do repo google/fonts "
                   "pra <google>/licencas/ e rode de novo.")
-        if not args.out_classicas:
-            print("AVISO: classicas licenciadas incluidas no zip publico — exposicao de "
-                  "licenciamento, decisao pendente (use --out-classicas pra separar)")
         empacotar(saida, args.out, licencas)
     else:
         print(f"\nsem --google: nenhuma familia livre, {args.out} nao foi tocado")
@@ -291,6 +284,15 @@ def main():
         empacotar(classicas, args.out_classicas)
         print("  ^ licenca Adobe/Linotype: NAO subir pro GitHub nem pro release; "
               "entregar pelo canal privado (o mesmo das texturas/HDRIs)")
+    else:
+        puladas = ", ".join(sorted(classicas.keys()))
+        comando = f"python3 tools/make_fonts.py {args.legado}"
+        if args.google:
+            comando += f" --google {args.google}"
+        comando += f" --out {args.out} --out-classicas ~/entrega/fontes-classicas.zip"
+        print(f"\nAVISO: {len(classicas)} familia(s) classica(s) licenciada(s) FORA do zip "
+              f"publico ({puladas}) — licenca comprada, sem direito de redistribuicao "
+              f"publica. Pra gerar o zip do canal privado:\n    {comando}")
 
     print(f"\ndescartados: {len(descartes)}")
     for nome, motivo in descartes[:5]:
