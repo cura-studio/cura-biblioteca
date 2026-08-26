@@ -65,6 +65,11 @@ if ($env:PROCESSOR_ARCHITECTURE -eq 'x86' -and [Environment]::Is64BitOperatingSy
 # mesmo que esta execução esteja com CURA_BASE_URL apontando pasta de teste.
 $script:OfficialBaseUrl = "https://github.com/joaotegoni/cura-biblioteca/releases/latest/download"
 $script:UpdaterTaskName = "CURA Biblioteca Updater"
+# Marcado por Register-CuraUpdater quando o registro do auto-update falha
+# (schtasks/Register-ScheduledTask negado por política corporativa etc). O
+# resumo final do passo 11 lê esta flag pra avisar o aluno - sem isso a
+# máquina fica muda pra sempre e nunca recebe release nova.
+$script:UpdaterFailed = $false
 # Chave de fontes per-user. Escopo de SCRIPT de propósito: o -Uninstall roda e
 # sai muito antes do bloco de fontes, então uma variável criada lá embaixo
 # chegaria $null na remoção.
@@ -545,10 +550,12 @@ exit `$code
                 Write-CuraLog -LogPath $LogPath -Message "auto-update registrado via schtasks (logon)"
             } else {
                 Write-CuraLog -LogPath $LogPath -Message "aviso: não foi possível registrar o auto-update (schtasks retornou $LASTEXITCODE) - a biblioteca não vai se atualizar sozinha nesta máquina."
+                $script:UpdaterFailed = $true
             }
         }
     } catch {
         Write-CuraLog -LogPath $LogPath -Message "aviso: não foi possível registrar o auto-update: $($_.Exception.Message)"
+        $script:UpdaterFailed = $true
     }
 }
 
@@ -1478,6 +1485,7 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wPa
             Write-Host $msg
             Write-Host "algum item falhou (download, integridade ou fonte em uso) - veja o log para detalhes."
             if ($psHint) { Write-Host $psHint }
+            if ($script:UpdaterFailed) { Write-Host "a atualização automática não pôde ser ativada neste computador (política ou permissão do windows). para receber versões novas, rode este instalador de novo quando o suporte avisar." }
             Write-Host "log: $LogPath"
             exit 2
         }
@@ -1488,6 +1496,7 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wPa
             Write-Host "se alguma fonte não aparecer no seu programa, feche e abra o programa (ou faça logoff e login)."
         }
         if ($psHint) { Write-Host $psHint }
+        if ($script:UpdaterFailed) { Write-Host "a atualização automática não pôde ser ativada neste computador (política ou permissão do windows). para receber versões novas, rode este instalador de novo quando o suporte avisar." }
         if ($mantidosAbaixoDoMinimo.Count -gt 0) {
             Write-Host "o cura | ferramentas continua instalado no seu SketchUp $($mantidosAbaixoDoMinimo -join ', '), mas não recebe mais atualização - a partir desta versão pedimos o $($manifest.min_sketchup). pra tirar, use o desinstalador."
         }
@@ -1496,12 +1505,24 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wPa
         Write-Host "log: $LogPath"
         exit 0
     } finally {
-        if (Test-Path -LiteralPath $TempDir) {
-            Remove-Item -LiteralPath $TempDir -Recurse -Force -ErrorAction SilentlyContinue
+        # Directory.Delete (.NET) em vez de Remove-Item -Recurse: a pasta de
+        # fontes extraídas (fonts-extract/) tem nomes como
+        # Archivo[wdth,wght].ttf, e o PS 5.1 trata colchete como wildcard no
+        # Remove-Item - uma instalação inteira, já com tudo gravado, morria
+        # AQUI na limpeza e o Inno mostrava "a instalação encontrou um erro".
+        # Lixo em temp é inofensivo; derrubar uma instalação completa não é -
+        # por isso try/catch próprio, que nunca propaga.
+        try {
+            if (Test-Path -LiteralPath $TempDir) {
+                [System.IO.Directory]::Delete($TempDir, $true)
+            }
+        } catch {
+            Write-CuraLog -LogPath $LogPath -Message "aviso: não consegui limpar a pasta temporária ($TempDir): $($_.Exception.Message)"
         }
     }
 } catch {
     Write-CuraLog -LogPath $LogPath -Message "erro / erro inesperado: $($_.Exception.Message)" -IsError
+    Write-CuraLog -LogPath $LogPath -Message "linha $($_.InvocationInfo.ScriptLineNumber): $($_.ScriptStackTrace)"
     Write-Host ""
     Write-Host "log completo em: $LogPath"
     exit 2
