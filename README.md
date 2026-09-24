@@ -2,9 +2,26 @@
 
 # biblioteca cura
 
-A biblioteca cura reúne os plugins e fontes do método cura para SketchUp. Este instalador baixa sempre a versão mais recente diretamente do GitHub — não é preciso reinstalar manualmente a cada atualização; basta rodar o instalador de novo quando quiser atualizar (ele conserta a instalação existente).
+A biblioteca cura reúne os plugins, fontes e template do método cura para SketchUp. Este instalador baixa sempre a versão mais recente diretamente do GitHub — não é preciso reinstalar manualmente a cada atualização; basta rodar o instalador de novo quando quiser atualizar (ele conserta a instalação existente).
 
-## atualização 10.1.2: ferramentas 1.0.1
+## atualização 10.2.0: template do SketchUp
+
+O instalador também coloca `CURA.skp` na pasta de templates de cada SketchUp
+detectado, do 2018 em diante, no Windows e no Mac. Não há uma lista fixa de
+anos: uma nova versão instalada recebe o template na próxima execução do
+atualizador da Biblioteca, com o SketchUp fechado.
+
+No SketchUp, escolha o CURA em **Meus templates**. O instalador não troca o
+template padrão nem altera suas preferências. Um arquivo diferente que já
+esteja no mesmo destino é preservado em backup antes da substituição; outros
+templates não são alterados.
+
+O arquivo é o `template-cura-42001` original, salvo no formato SketchUp 2018,
+sem alterações internas. As configurações antigas do V-Ray foram mantidas:
+**não houve conversão nem validação para V-Ray 7**. SketchUp anterior a 2018
+não recebe este arquivo. O plugin Ferramentas continua na versão 1.0.1.
+
+## ferramentas 1.0.1
 
 A linha 0.5 do CURA Ferramentas foi encerrada. A Biblioteca distribui somente
 a 1.0.1, com a correção de leitura de pixels da captura. Quem está na 0.5 pode

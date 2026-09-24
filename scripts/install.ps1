@@ -420,6 +420,142 @@ function Get-CuraPhotoshopSpec {
     return [PSCustomObject]@{ file = $f; sha256 = $s; valid = $valid }
 }
 
+function Get-CuraTemplateSpec {
+    param($Manifest)
+    if ($null -eq $Manifest.sketchup_template) { return $null }
+    $spec = $Manifest.sketchup_template
+    # Um nome fixo evita ADS, nomes reservados e caminhos vindos do manifest.
+    $valid = ("$($spec.file)" -ceq 'CURA.skp') -and
+        ("$($spec.sha256)" -match '^[0-9a-fA-F]{64}$') -and
+        ("$($spec.min_sketchup)" -match '^20\d\d$')
+    return [PSCustomObject]@{ file = "$($spec.file)"; sha256 = "$($spec.sha256)"; min_sketchup = $spec.min_sketchup; valid = $valid }
+}
+
+function Test-CuraTemplatePath {
+    # Recusa junctions/symlinks em qualquer ancestral antes de ler ou escrever.
+    param([string]$Path)
+    try {
+        $cursor = [IO.Path]::GetFullPath($Path)
+        while ($cursor) {
+            $item = Get-Item -LiteralPath $cursor -Force -ErrorAction SilentlyContinue
+            if ($null -ne $item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return $false }
+            $cursor = [IO.Path]::GetDirectoryName($cursor)
+        }
+        return $true
+    } catch { return $false }
+}
+
+function Get-CuraTemplatePath {
+    param($Version)
+    return Join-Path (Join-Path $Version.VersionDir 'SketchUp\Templates') 'CURA.skp'
+}
+
+function Test-CuraTemplatesCurrent {
+    param($Manifest, $OldSnapshot, $DetectedVersions)
+    $spec = Get-CuraTemplateSpec -Manifest $Manifest
+    if ($null -eq $spec) { return $true }
+    if (-not $spec.valid) { return $false }
+    foreach ($ver in @($DetectedVersions)) {
+        if ($ver.Year -lt [int]$spec.min_sketchup) { continue }
+        $path = Get-CuraTemplatePath -Version $ver
+        $receipt = @($OldSnapshot.sketchup_templates | Where-Object { $_.file -eq $path -and $_.sha256 -eq $spec.sha256 })
+        if ($receipt.Count -eq 0 -or -not (Test-CuraTemplatePath -Path $path)) { return $false }
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
+        # O recibo confirma a versão distribuída. Não desfaz edições pessoais
+        # do template em toda execução diária do updater.
+    }
+    return $true
+}
+
+function Install-CuraTemplates {
+    param($Manifest, $OldSnapshot, $DetectedVersions, [string]$BaseUrl, [string]$TempDir, [string]$LogPath, [switch]$Quiet)
+    # Carrega recibos anteriores mesmo numa falha parcial; não perde o uninstall.
+    $receipts = @(@($OldSnapshot.sketchup_templates) | Where-Object { $null -ne $_ })
+    $result = [PSCustomObject]@{ receipts = $receipts; success = $true }
+    $spec = Get-CuraTemplateSpec -Manifest $Manifest
+    if ($null -eq $spec) { return $result }
+    try {
+        if (-not $spec.valid) { throw 'bloco sketchup_template inválido' }
+        $targets = @($DetectedVersions | Where-Object { $_.Year -ge [int]$spec.min_sketchup })
+        if ($targets.Count -eq 0) { return $result }
+        $payload = Join-Path $TempDir 'template-payload.skp'
+        if (-not (Get-CuraAsset -BaseUrl $BaseUrl -FileName $spec.file -OutFile $payload -LogPath $LogPath)) { throw 'download do template falhou' }
+        if ((Get-FileHash -LiteralPath $payload -Algorithm SHA256).Hash -ne $spec.sha256) { throw 'sha256 do template não confere' }
+        # Nesta etapa plugins/fontes já podem ter sido escritos: nunca exit
+        # antes do snapshot. Adia só o template e permite gravar os recibos.
+        if (Get-Process -Name 'SketchUp*' -ErrorAction SilentlyContinue) { throw 'SketchUp aberto; template adiado para a próxima atualização' }
+        foreach ($ver in $targets) {
+            try {
+                $dest = Get-CuraTemplatePath -Version $ver
+                if (-not (Test-CuraTemplatePath -Path $dest)) { throw 'caminho contém junction ou link simbólico' }
+                $parent = Split-Path -Parent $dest
+                New-Item -ItemType Directory -Path $parent -Force -ErrorAction Stop | Out-Null
+                $old = @($receipts | Where-Object { $_.file -eq $dest })
+                # Reparar outra versão/arquivo não deve desfazer personalizações
+                # de um template que já recebeu este mesmo payload.
+                if (@($old | Where-Object { $_.sha256 -eq $spec.sha256 }).Count -gt 0 -and (Test-Path -LiteralPath $dest -PathType Leaf)) { continue }
+                $same = (Test-Path -LiteralPath $dest -PathType Leaf) -and ((Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash -eq $spec.sha256)
+                $owned = ($old.Count -gt 0 -and $old[0].owned -eq $true)
+                if (-not $same) {
+                    if (Test-Path -LiteralPath $dest) {
+                        if (-not (Test-Path -LiteralPath $dest -PathType Leaf)) { throw 'destino não é um arquivo' }
+                        $backup = "$dest.cura-backup-$([guid]::NewGuid().ToString('N'))"
+                        $originalHash = (Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash
+                        Copy-Item -LiteralPath $dest -Destination $backup -ErrorAction Stop
+                        if ((Get-FileHash -LiteralPath $backup -Algorithm SHA256).Hash -ne $originalHash) { throw 'backup do template não confere' }
+                        Write-CuraLog -LogPath $LogPath -Message "template anterior preservado: $backup"
+                    }
+                    # Substitui só depois de preparar uma cópia completa no mesmo volume.
+                    $staged = Join-Path $parent ('.cura-template-' + [guid]::NewGuid().ToString('N') + '.tmp')
+                    try {
+                        Copy-Item -LiteralPath $payload -Destination $staged -ErrorAction Stop
+                        if ((Get-FileHash -LiteralPath $staged -Algorithm SHA256).Hash -ne $spec.sha256) { throw 'cópia do template não confere' }
+                        Move-Item -LiteralPath $staged -Destination $dest -Force -ErrorAction Stop
+                    } finally {
+                        if (Test-Path -LiteralPath $staged) { Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue }
+                    }
+                    $owned = $true
+                }
+                $receipts = @($receipts | Where-Object { $_.file -ne $dest })
+                $receipts += [PSCustomObject]@{ year = $ver.Year; file = $dest; sha256 = $spec.sha256; owned = $owned }
+                Write-CuraLog -LogPath $LogPath -Message "template CURA disponível no SketchUp $($ver.Year): $dest"
+            } catch {
+                $result.success = $false
+                Write-CuraLog -LogPath $LogPath -Message "erro / template SketchUp $($ver.Year): $($_.Exception.Message)" -IsError
+            }
+        }
+    } catch {
+        $result.success = $false
+        Write-CuraLog -LogPath $LogPath -Message "erro / template: $($_.Exception.Message)" -IsError
+    }
+    $result.receipts = $receipts
+    return $result
+}
+
+function Remove-CuraTemplates {
+    param($Receipts, [string]$SketchUpRoot, [string]$LogPath)
+    $success = $true
+    foreach ($receipt in @($Receipts)) {
+        try {
+            if ($null -eq $receipt -or $receipt.owned -ne $true -or "$($receipt.year)" -notmatch '^20\d\d$' -or "$($receipt.sha256)" -notmatch '^[0-9a-fA-F]{64}$') { continue }
+            $expected = Get-CuraTemplatePath -Version ([PSCustomObject]@{ VersionDir = (Join-Path $SketchUpRoot "SketchUp $($receipt.year)") })
+            if ($receipt.file -ne $expected -or -not (Test-CuraTemplatePath -Path $expected)) { continue }
+            if (Test-Path -LiteralPath $expected -PathType Leaf) {
+                if ((Get-FileHash -LiteralPath $expected -Algorithm SHA256).Hash -eq $receipt.sha256) {
+                    Remove-Item -LiteralPath $expected -Force -ErrorAction Stop
+                    Write-CuraLog -LogPath $LogPath -Message "template removido: $expected (backups preservados)"
+                } else {
+                    Write-CuraLog -LogPath $LogPath -Message "template editado pelo usuário, preservado: $expected"
+                }
+            }
+        } catch {
+            $success = $false
+            Write-CuraLog -LogPath $LogPath -Message "aviso: falha ao remover template; recibo será mantido: $($_.Exception.Message)"
+        }
+    }
+    return $success
+}
+
 function Test-CuraUpToDate {
     # Decide se dá pra pular a instalação inteira (no-op). Só quando NADA mudou:
     # mesma biblioteca_version no snapshot, toda versão do SketchUp detectada já
@@ -429,7 +565,8 @@ function Test-CuraUpToDate {
     param(
         [Parameter(Mandatory = $true)]$Manifest,
         $OldSnapshot,
-        $DetectedVersions
+        $DetectedVersions,
+        $TemplateVersions = $DetectedVersions
     )
     if ($null -eq $OldSnapshot) { return $false }
     if ($OldSnapshot.biblioteca_version -ne $Manifest.biblioteca_version) { return $false }
@@ -453,6 +590,8 @@ function Test-CuraUpToDate {
             }
         }
     }
+
+    if (-not (Test-CuraTemplatesCurrent -Manifest $Manifest -OldSnapshot $OldSnapshot -DetectedVersions $TemplateVersions)) { return $false }
 
     foreach ($f in $OldSnapshot.fonts) {
         if (-not (Test-Path -LiteralPath $f.file)) { return $false }
@@ -625,6 +764,9 @@ function Invoke-CuraUninstall {
     foreach ($p in $snap.photoshop) {
         Write-Host "  - photoshop: $($p.file)"
     }
+    foreach ($t in $snap.sketchup_templates) {
+        if ($t.owned -eq $true) { Write-Host "  - template: $($t.file) (só se não foi editado; backups ficam)" }
+    }
     # a lista acima não deixa claro que os 3 arquivos do upscaler moram numa
     # pasta da MÁQUINA (C:\Users\Public), não do perfil: quem confirma achando
     # que remove "a minha instalação" tira o atalho F2 de todo mundo que usa
@@ -732,6 +874,10 @@ function Invoke-CuraUninstall {
         }
     }
 
+    if (-not (Remove-CuraTemplates -Receipts $snap.sketchup_templates -SketchUpRoot $sketchUpRootUninstall -LogPath $LogPath)) {
+        Write-CuraLog -LogPath $LogPath -Message 'erro / desinstalação incompleta. snapshot preservado; feche programas e tente novamente.' -IsError
+        exit 2
+    }
     Unregister-CuraUpdater -TaskName $script:UpdaterTaskName -LogPath $LogPath
 
     Remove-Item -LiteralPath $SnapshotPath -Force -ErrorAction SilentlyContinue
@@ -940,7 +1086,7 @@ try {
         # --- No-op: nada mudou desde a última instalação? pula tudo. Mantém o
         # auto-update diário/logon barato e não fica re-extraindo plugin à toa
         # (re-churn de arquivo reindexaria o SketchUp sem motivo). ---
-        if (Test-CuraUpToDate -Manifest $manifest -OldSnapshot $oldSnapshot -DetectedVersions $versions) {
+        if (Test-CuraUpToDate -Manifest $manifest -OldSnapshot $oldSnapshot -DetectedVersions $versions -TemplateVersions $allVersions) {
             Write-CuraLog -LogPath $LogPath -Message "no-op: biblioteca já na versão $($manifest.biblioteca_version)."
             # self-cura: garante que a tarefa agendada existe/está com a
             # definição mais recente mesmo quando não há nada pra
@@ -1385,6 +1531,10 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wPa
             }
         }
 
+        # Template nativo: todas as versões compatíveis, independente do mínimo dos plugins.
+        $templateResult = Install-CuraTemplates -Manifest $manifest -OldSnapshot $oldSnapshot -DetectedVersions $allVersions -BaseUrl $BaseUrl -TempDir $TempDir -LogPath $LogPath -Quiet:$Quiet
+        if (-not $templateResult.success) { $hadErrors = $true }
+
         # --- 9. Snapshot (para desinstalação futura) ---
         # Se algum item falhou (sha256/download/extração), grava a
         # biblioteca_version ANTIGA em vez da nova - senão a próxima rodada
@@ -1406,6 +1556,7 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wPa
             sketchup_versions  = $snapshotVersions
             fonts              = $installedFonts
             photoshop          = $installedPhotoshop
+            sketchup_templates = @($templateResult.receipts)
         }
         # Escrita atômica: grava num .tmp e só substitui o snapshot real com
         # Move-Item -Force por cima - evita installed.json meio escrito se o

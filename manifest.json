@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "biblioteca_version": "10.1.2",
+  "biblioteca_version": "10.2.0",
   "min_sketchup": 2018,
   "plugins": [
     {
@@ -25,6 +25,11 @@
     "file": "photoshop.zip",
     "url": null,
     "sha256": "4111e00330da8d43b42732a28bdfdd65d534d0d737c44edd68ab4d55399a52b9"
+  },
+  "sketchup_template": {
+    "file": "CURA.skp",
+    "sha256": "e76d4c2db4168b3a1fac161eef80fbb0ba9861903b2bbb9860bf79ad995bbef4",
+    "min_sketchup": 2018
   },
   "remove": []
 }

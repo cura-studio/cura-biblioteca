@@ -424,6 +424,12 @@ def main():
     if photoshop:
         emit("PHOTOSHOP", photoshop.get("file", ""), photoshop.get("sha256", ""))
 
+    template = data.get("sketchup_template")
+    if template is not None:
+        if not isinstance(template, dict):
+            template = {}
+        emit("TEMPLATE", template.get("file", ""), template.get("sha256", ""), template.get("min_sketchup", ""))
+
     for name in data.get("remove", []) or []:
         emit("REMOVE", name)
 
@@ -554,6 +560,28 @@ state == "photoshop" && /^  \}/ {
   state = "top"
   next
 }
+
+state == "top" && /^  "sketchup_template": null/ { next }
+state == "top" && /^  "sketchup_template": \{[[:space:]]*\}/ {
+  print "TEMPLATE" US US US
+  next
+}
+state == "top" && /^  "sketchup_template": \{/ {
+  state = "template"
+  t_file = ""; t_sha256 = ""; t_min = ""
+  next
+}
+state == "template" && /^    "file":/ { t_file = strval($0); next }
+state == "template" && /^    "sha256":/ { t_sha256 = strval($0); next }
+state == "template" && /^    "min_sketchup":/ {
+  t_min = $0; sub(/^.*: */, "", t_min); sub(/,? *$/, "", t_min); next
+}
+state == "template" && /^  \}/ {
+  print "TEMPLATE" US t_file US t_sha256 US t_min
+  state = "top"
+  next
+}
+state == "top" && /^  "sketchup_template":/ { print "TEMPLATE" US US US; next }
 
 state == "top" && /^  "remove": \[\]/ { next }
 state == "top" && /^  "remove": \[/ { state = "remove"; next }
@@ -704,6 +732,7 @@ PHOTOSHOP_FILE=""; PHOTOSHOP_SHA256=""
 # sha256 fora do formato). Diferente de "sem bloco" (os dois campos vazios e
 # esta flag em 0), que e o manifest antigo em cache e nao e erro nenhum.
 PHOTOSHOP_INVALID=0
+TEMPLATE_FILE=""; TEMPLATE_SHA256=""; TEMPLATE_MIN=""; TEMPLATE_PRESENT=0
 REMOVE_NAMES=()
 
 parse_manifest() {
@@ -761,6 +790,10 @@ parse_manifest() {
         PHOTOSHOP_FILE="$f1"
         PHOTOSHOP_SHA256="$f2"
         ;;
+      TEMPLATE)
+        TEMPLATE_PRESENT=1
+        TEMPLATE_FILE="$f1"; TEMPLATE_SHA256="$f2"; TEMPLATE_MIN="$f3"
+        ;;
       REMOVE)
         REMOVE_NAMES+=("$f1")
         ;;
@@ -776,6 +809,19 @@ parse_manifest() {
   if [ -z "$BIBLIOTECA_VERSION" ]; then
     err "manifest.json inválido (sem biblioteca_version). log: $LOG_PATH. tente de novo mais tarde."
     exit 2
+  fi
+  # Nome fixo limita tanto a escrita como a futura desinstalacao ao nosso arquivo.
+  if [ "$TEMPLATE_PRESENT" = "1" ]; then
+    TEMPLATE_SHA256="$(printf '%s' "$TEMPLATE_SHA256" | tr 'A-F' 'a-f')"
+    local template_ok=1
+    [ "$TEMPLATE_FILE" = "CURA.skp" ] || template_ok=0
+    [ "${#TEMPLATE_SHA256}" -eq 64 ] || template_ok=0
+    case "$TEMPLATE_SHA256" in *[!0-9a-f]*) template_ok=0 ;; esac
+    case "$TEMPLATE_MIN" in 20[0-9][0-9]) ;; *) template_ok=0 ;; esac
+    if [ "$template_ok" = "0" ]; then
+      err "manifest.json inválido (sketchup_template). nenhuma instalação iniciada. log: $LOG_PATH."
+      exit 2
+    fi
   fi
   case "$MIN_SKETCHUP" in
     [0-9][0-9][0-9][0-9]) ;;
@@ -965,6 +1011,154 @@ move_to_recovery() {
     return 1
   fi
   mv -- "$src" "$dest_dir/" 2>/dev/null || return 1
+  return 0
+}
+
+# Templates tem minimo proprio: nao depende do minimo dos plugins. Tambem
+# detecta .app ainda sem perfil (SketchUp nunca aberto), sem teto de ano.
+discover_template_dirs() {
+  local support="$1" applications="$2" minimum="$3"
+  local candidate name year target existing seen
+  TEMPLATE_DIRS=()
+  for candidate in "$support"/SketchUp\ * "$applications"/SketchUp\ *; do
+    [ -d "$candidate" ] || continue
+    name="${candidate##*/}"
+    year="${name#SketchUp }"
+    case "$year" in [1-9][0-9][0-9][0-9]) ;; *) continue ;; esac
+    [ "$year" -ge "$minimum" ] || continue
+    case "$candidate" in
+      "$applications"/*) [ -d "$candidate/SketchUp.app" ] || continue ;;
+    esac
+    target="$support/SketchUp $year/SketchUp/Templates"
+    seen=0
+    if [ "${#TEMPLATE_DIRS[@]}" -gt 0 ]; then
+      for existing in "${TEMPLATE_DIRS[@]}"; do
+        [ "$existing" != "$target" ] || seen=1
+      done
+    fi
+    [ "$seen" = "1" ] || TEMPLATE_DIRS+=("$target")
+  done
+}
+
+templates_up_to_date() {
+  local target registered path
+  [ "$TEMPLATE_PRESENT" = "1" ] || return 0
+  if [ "${#TEMPLATE_DIRS[@]}" -gt 0 ]; then
+    for target in "${TEMPLATE_DIRS[@]}"; do
+      [ -f "$target/CURA.skp" ] && [ ! -L "$target/CURA.skp" ] || return 1
+      registered=0
+      if [ "${#SNAP_ITEM_PATHS[@]}" -gt 0 ]; then
+        for path in "${SNAP_ITEM_PATHS[@]}"; do
+          [ "$path" != "$target/CURA.skp" ] || registered=1
+        done
+      fi
+      [ "$registered" = "1" ] || return 1
+    done
+  fi
+  return 0
+}
+
+# Recusa links em qualquer ancestral abaixo do perfil; nao escreve fora dele.
+is_safe_template_path() {
+  local path="$1" relative year cursor
+  relative="${path#"$APP_SUPPORT_DIR"/}"
+  year="${relative%%/*}"
+  year="${year#SketchUp }"
+  case "$year" in [1-9][0-9][0-9][0-9]) ;; *) return 1 ;; esac
+  [ "$path" = "$APP_SUPPORT_DIR/SketchUp $year/SketchUp/Templates/CURA.skp" ] || return 1
+  cursor="$path"
+  while [ "$cursor" != "$APP_SUPPORT_DIR" ]; do
+    [ ! -L "$cursor" ] || return 1
+    cursor="${cursor%/*}"
+  done
+  [ ! -L "$APP_SUPPORT_DIR" ]
+}
+
+# SHA confere antes de qualquer escrita. Copia atomica; copia diferente do
+# aluno fica em backup exclusivo, fora de Templates e fora do uninstall.
+install_template_file() {
+  local source="$1" target="$2" expected="$3" stage backup registered_path
+  [ "$(shasum -a 256 "$source" | awk '{print $1}')" = "$expected" ] || return 1
+  is_safe_template_path "$target" || return 1
+  if [ -e "$target" ]; then
+    [ -f "$target" ] || return 1
+    # Reparo de outro componente/ano na MESMA release nao repoe template que
+    # o aluno editou. Nova release ainda faz backup antes de substituir.
+    if [ -n "$BIBLIOTECA_VERSION" ] && [ "$BIBLIOTECA_VERSION" = "$SNAP_BIBLIOTECA_VERSION" ] && [ "${#SNAP_ITEM_PATHS[@]}" -gt 0 ]; then
+      for registered_path in "${SNAP_ITEM_PATHS[@]}"; do
+        [ "$registered_path" != "$target" ] || return 0
+      done
+    fi
+    if [ "$(shasum -a 256 "$target" | awk '{print $1}')" = "$expected" ]; then
+      return 0
+    fi
+  fi
+  mkdir -p "${target%/*}" || return 1
+  stage="$(mktemp "${target%/*}/.cura-template.XXXXXX")" || return 1
+  if ! cp "$source" "$stage" || ! chmod 644 "$stage"; then
+    rm -f -- "$stage"
+    return 1
+  fi
+  if [ "$(shasum -a 256 "$stage" | awk '{print $1}')" != "$expected" ]; then
+    rm -f -- "$stage"
+    return 1
+  fi
+  if [ -e "$target" ]; then
+    mkdir -p "$CURA_STATE_DIR/template-backups" || { rm -f -- "$stage"; return 1; }
+    backup="$(mktemp -d "$CURA_STATE_DIR/template-backups/cura.XXXXXX")" || { rm -f -- "$stage"; return 1; }
+    if ! cp -p "$target" "$backup/CURA.skp" || ! cmp -s "$target" "$backup/CURA.skp"; then
+      rm -f -- "$stage"
+      return 1
+    fi
+    log "template anterior preservado: $target -> $backup/CURA.skp"
+  fi
+  if ! mv -f -- "$stage" "$target"; then
+    rm -f -- "$stage"
+    return 1
+  fi
+  return 0
+}
+
+recover_template_file() {
+  local path="$1" recovery
+  is_safe_template_path "$path" || return 1
+  [ -f "$path" ] || return 1
+  mkdir -p "$CURA_STATE_DIR/template-backups" || return 1
+  recovery="$(mktemp -d "$CURA_STATE_DIR/template-backups/uninstall.XXXXXX")" || return 1
+  move_to_recovery "$path" "$recovery" || return 1
+  log "template preservado na desinstalação: $recovery/CURA.skp"
+}
+
+install_templates() {
+  [ "$TEMPLATE_PRESENT" = "1" ] && [ "${#TEMPLATE_DIRS[@]}" -gt 0 ] || return 0
+  local template_asset="$TMP_DIR/CURA.skp" template_dir template_target
+  local templates_installed=0
+  if ! fetch_asset_optional "$TEMPLATE_FILE" "$template_asset" ||
+     [ "$(shasum -a 256 "$template_asset" 2>/dev/null | awk '{print $1}')" != "$TEMPLATE_SHA256" ]; then
+    warn "template CURA não baixado ou com integridade inválida; será tentado novamente."
+    HAD_ERROR=1
+  elif pgrep -x "SketchUp" >/dev/null 2>&1; then
+    # Outros componentes ja podem ter sido escritos. Nao sair/perguntar aqui:
+    # terminar snapshot e updater, preservando versao antiga para retentar.
+    warn "SketchUp abriu durante a instalação; template adiado para a próxima atualização."
+    HAD_ERROR=1
+  else
+    for template_dir in "${TEMPLATE_DIRS[@]}"; do
+      template_target="$template_dir/CURA.skp"
+      if install_template_file "$template_asset" "$template_target" "$TEMPLATE_SHA256"; then
+        ITEM_LABELS+=("template CURA (${template_dir#"$APP_SUPPORT_DIR"/})")
+        ITEM_PATHS+=("$template_target")
+        templates_installed=$((templates_installed + 1))
+        log "template instalado: $template_target"
+      else
+        warn "não foi possível instalar o template em $template_dir; será tentado novamente."
+        HAD_ERROR=1
+      fi
+    done
+    if [ "$templates_installed" -gt 0 ] && [ "$QUIET" != "1" ]; then
+      say "template CURA instalado na pasta Templates de $templates_installed versões do SketchUp. seu modelo padrão não foi alterado."
+    fi
+  fi
   return 0
 }
 
@@ -1161,6 +1355,11 @@ do_install() {
   fetch_asset "manifest.json" "$manifest_path"
   parse_manifest "$manifest_path"
 
+  local TEMPLATE_DIRS=()
+  if [ "$TEMPLATE_PRESENT" = "1" ]; then
+    discover_template_dirs "$APP_SUPPORT_DIR" /Applications "$TEMPLATE_MIN"
+  fi
+
   local VERSION_YEARS=() VERSION_DIRS=() SKIPPED_YEARS=()
   local d base year plugins_dir
   for d in "$APP_SUPPORT_DIR"/"SketchUp 20"*; do
@@ -1228,6 +1427,7 @@ do_install() {
       if [ -n "$PHOTOSHOP_FILE" ] && [ "$ps_no_snap" = "1" ]; then
         noop=0
       fi
+      templates_up_to_date || noop=0
       if [ "$noop" = "1" ] && [ "${#VERSION_DIRS[@]}" -gt 0 ]; then
         for plugins_dir_c in "${VERSION_DIRS[@]}"; do
           for pi_c in "${!PLUGIN_IDS[@]}"; do
@@ -1453,6 +1653,10 @@ do_install() {
   else
     log "photoshop: manifest sem o bloco photoshop, etapa pulada."
   fi
+
+  # Template cru, sem conversao V-Ray e sem alterar a preferencia de modelo
+  # padrao. Falha segura a versao do snapshot para retentar no proximo update.
+  install_templates
 
   # reconciliacao com a rodada anterior. o installed.json e reconstruido do
   # ZERO a cada rodada, entao item que saiu do manifest (fonte que virou .ttc,
@@ -1706,6 +1910,13 @@ do_uninstall() {
 
   local path
   for path in "${SNAP_ITEM_PATHS[@]}"; do
+    if is_safe_template_path "$path"; then
+      if [ -e "$path" ] && ! recover_template_file "$path"; then
+        err "não foi possível preservar o template $path; registro mantido para nova tentativa."
+        exit 2
+      fi
+      continue
+    fi
     if is_allowed_removal_path "$path"; then
       if [ -e "$path" ]; then
         rm -rf -- "$path"

@@ -52,12 +52,12 @@ Name: "brazilianportuguese"; MessagesFile: "compiler:Languages\BrazilianPortugue
 ; do sistema; capitalizacao natural ajuda o aluno a achar o programa).
 [Messages]
 brazilianportuguese.WelcomeLabel1=biblioteca cura
-brazilianportuguese.WelcomeLabel2=este instalador baixa e instala a versão mais recente dos plugins e fontes do método cura.%n%nesta é uma versão beta: seguimos testando e corrigindo.%n%nfeche o SketchUp antes de continuar.
+brazilianportuguese.WelcomeLabel2=este instalador baixa e instala a versão mais recente dos plugins, fontes e template do método cura.%n%nesta é uma versão beta: seguimos testando e corrigindo.%n%nfeche o SketchUp antes de continuar.
 brazilianportuguese.FinishedHeadingLabel=pronto
 ; A linha do cura upscaler e a UNICA instrucao do passo F2 que sobrevive: o
 ; console do install.ps1 fecha junto com o processo e leva a dica embora. Sem
 ; ela, os 3 arquivos ficam na pasta compartilhada e ninguem liga o atalho.
-brazilianportuguese.FinishedLabel=biblioteca cura (beta) instalada. abra o SketchUp e confira o menu Extensões.%n%npra ativar o cura upscaler no photoshop, siga o passo único da página do curso.%n%nachou algum problema? mande o log pro suporte.
+brazilianportuguese.FinishedLabel=biblioteca cura (beta) instalada. abra o SketchUp e confira o menu Extensões. o template CURA está disponível na seleção de templates; seu padrão não foi alterado.%n%npra ativar o cura upscaler no photoshop, siga o passo único da página do curso.%n%nachou algum problema? mande o log pro suporte.
 
 [Files]
 Source: "..\scripts\install.ps1"; DestDir: "{app}"; Flags: ignoreversion

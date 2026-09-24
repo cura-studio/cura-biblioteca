@@ -7,7 +7,7 @@ Uso:
 Roda a partir de qualquer diretorio (resolve a raiz do repo pelo proprio
 caminho deste arquivo). Le o manifest.json existente na raiz, recalcula o
 sha256 de cada payload declarado (plugins[].file e, se presentes, fonts.file e
-photoshop.file)
+photoshop.file e sketchup_template.file)
 contra o arquivo correspondente em payload/, e regrava manifest.json com os
 hashes atualizados. Nao inventa nem remove campos — so atualiza "sha256" dos
 itens ja descritos no manifest, preservando todo o resto (schema,
@@ -159,6 +159,12 @@ def main() -> int:
     photoshop = manifest.get("photoshop")
     if photoshop is not None:
         result = update_entry(photoshop, label=f"photoshop ({photoshop.get('file', '?')})")
+        if result:
+            changes.append(result)
+
+    template = manifest.get("sketchup_template")
+    if template is not None:
+        result = update_entry(template, label=f"sketchup_template ({template.get('file', '?')})")
         if result:
             changes.append(result)
 

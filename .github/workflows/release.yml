@@ -6,6 +6,9 @@ on:
       - "v*"
 
 jobs:
+  templates:
+    uses: ./.github/workflows/templates.yml
+
   manifest:
     name: verifica manifest.json
     runs-on: ubuntu-latest
@@ -108,7 +111,7 @@ jobs:
 
   release:
     name: publica release no github
-    needs: [manifest, windows-installer]
+    needs: [manifest, windows-installer, templates]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -131,7 +134,7 @@ jobs:
       - name: publica release
         uses: softprops/action-gh-release@v2
         with:
-          # os 8 assets sao todos obrigatorios: faltar um publica release verde
+          # os 9 assets sao todos obrigatorios: faltar um publica release verde
           # e quebrada — sem fonts.zip todo instalador loga erro, grava a
           # biblioteca_version ANTIGA no snapshot e re-tenta todo dia; sem
           # install.sh a linha do Terminal do mac vira 404.
@@ -155,6 +158,7 @@ jobs:
             payload/fonts.zip
             payload/photoshop.zip
             payload/CuraUpscaler.jsx
+            payload/CURA.skp
             manifest.json
             scripts/install.sh
             scripts/install.ps1

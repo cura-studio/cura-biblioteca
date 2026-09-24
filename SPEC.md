@@ -4,6 +4,26 @@ Instalador "eterno" 2 plataformas. Bootstrapper fino: conteúdo + lógica baixad
 
 ## Arquitetura
 
+### adição 10.2.0: template do SketchUp
+
+`sketchup_template` é um bloco opcional do manifest: `file` (`CURA.skp`),
+`sha256`, `min_sketchup` (mínimo próprio, hoje 2018). O asset
+`CURA.skp` entra na release e no cálculo de hashes de `make_manifest.py`.
+Não é um ZIP nem um plugin; não entra em `plugins[].roots`.
+
+Download único verificado → cópia para `SketchUp/Templates/CURA.skp` de cada
+ano detectado compatível, sem limite superior fixo e sem alterar preferências.
+Windows detecta perfis e registro; Mac detecta perfis e apps em Applications.
+Arquivo diferente no mesmo destino exige backup único antes da substituição.
+No-op exige template presente por versão; ano novo ou arquivo ausente força
+reparo. Falha não pode certificar atualização completa. Recibos registram os
+destinos para desinstalação restrita, com preservação de edições do usuário.
+Os testes exercitam funções reais em diretórios temporários, sem executar o
+instalador sobre o perfil real, e são gate da release nos dois sistemas.
+
+O binário original 42001 permanece byte-idêntico: não declarar V-Ray 7 nem
+compatibilidade com SketchUp anterior a 2018. Demais regras abaixo mantêm-se.
+
 ```
 Aluno
  ├─ Windows: BibliotecaCURA-Setup.exe (Inno, per-user, sem admin)
@@ -14,7 +34,7 @@ Aluno
 GitHub repo joaotegoni/cura-biblioteca (público)
  └─ Release "latest" assets:
     manifest.json, cura-ferramentas.rbz, fonts.zip, photoshop.zip, CuraUpscaler.jsx,
-    install.ps1, install.sh, BibliotecaCURA-Setup.exe
+    CURA.skp, install.ps1, install.sh, BibliotecaCURA-Setup.exe
 ```
 
 `photoshop.zip` = payload do **cura upscaler** (Photoshop): os 3 arquivos que o instalador grava na pasta compartilhada (`CuraUpscaler.jsx`, `instalar-cura-upscaler.jsx`, `cura-upscaler.atn`). Gerado por `tools/make_photoshop.py`.

@@ -1,0 +1,39 @@
+name: templates
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'scripts/install.*'
+      - 'tools/test_template_*'
+      - 'tools/make_manifest.py'
+      - 'manifest.json'
+      - 'payload/CURA.skp'
+      - '.github/workflows/templates.yml'
+  pull_request:
+    paths:
+      - 'scripts/install.*'
+      - 'tools/test_template_*'
+      - 'manifest.json'
+      - 'payload/CURA.skp'
+      - '.github/workflows/templates.yml'
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: template no Windows PowerShell 5.1
+        shell: powershell
+        run: ./tools/test_template_windows.ps1
+  mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: template no bash 3.2 (python e fallback awk)
+        run: /bin/bash tools/test_template_mac.sh
+      - name: integridade do manifest e payloads
+        run: |
+          python3 tools/make_manifest.py
+          git diff --exit-code -- manifest.json
