@@ -4,6 +4,19 @@
 
 A biblioteca cura reúne os plugins e fontes do método cura para SketchUp. Este instalador baixa sempre a versão mais recente diretamente do GitHub — não é preciso reinstalar manualmente a cada atualização; basta rodar o instalador de novo quando quiser atualizar (ele conserta a instalação existente).
 
+## atualização 10.1.2: ferramentas 1.0.1
+
+A linha 0.5 do CURA Ferramentas foi encerrada. A Biblioteca distribui somente
+a 1.0.1, com a correção de leitura de pixels da captura. Quem está na 0.5 pode
+atualizar diretamente para 1.0.1, sem instalar versões intermediárias.
+
+O atualizador da Biblioteca, quando registrado e ativo, verifica no login e
+diariamente; se o SketchUp estiver aberto, adia para o próximo disparo. Quem
+instalou somente um RBZ antigo sem esse atualizador deve executar o instalador
+da Biblioteca uma vez. O botão de atualização dentro do plugin é uma alternativa
+e exige clique e reinício do SketchUp. Publicação não confirma atualização de
+cada computador; o rodapé do plugin deve mostrar 1.0.1.
+
 ## beta
 
 A biblioteca está em **beta**: o instalador é estável, mas o plugin `cura | ferramentas` ainda está em teste e recebe correções com frequência. Como o instalador se atualiza sozinho, quem instalar agora recebe cada correção automaticamente — não é preciso reinstalar.

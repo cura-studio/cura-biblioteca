@@ -1,15 +1,15 @@
 {
   "schema": 1,
-  "biblioteca_version": "10.1.1",
+  "biblioteca_version": "10.1.2",
   "min_sketchup": 2018,
   "plugins": [
     {
       "id": "cura-ferramentas",
       "name": "cura | ferramentas",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "file": "cura-ferramentas.rbz",
       "url": null,
-      "sha256": "7d7f72e558736315b19d43540d4ce88cf36a5c72aca5b6b21e80ebba29e56a32",
+      "sha256": "81f713e7233d7a40844043ee65d2b4a192c7519cd3c3083dd85ba96e8c056400",
       "roots": [
         "cura_ferramentas",
         "cura_ferramentas.rb"
