@@ -5,7 +5,7 @@
 # sem mapfile/readarray, sem ${var,,}. Ver SPEC.md na raiz do repo.
 #
 # Uso:
-#   /bin/bash -c "$(curl -fsSL https://github.com/joaotegoni/cura-biblioteca/releases/latest/download/install.sh)"
+#   /bin/bash -c "$(curl --proto '=https' --proto-redir '=https' -fsSL https://github.com/cura-studio/cura-biblioteca/releases/latest/download/install.sh)"
 #   ./install.sh --uninstall
 #   ./install.sh --limpar
 #
@@ -23,7 +23,7 @@ set -Eeuo pipefail
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-DEFAULT_BASE_URL="https://github.com/joaotegoni/cura-biblioteca/releases/latest/download"
+DEFAULT_BASE_URL="https://github.com/cura-studio/cura-biblioteca/releases/latest/download"
 BASE_URL="${CURA_BASE_URL:-$DEFAULT_BASE_URL}"
 BASE_URL="${BASE_URL%/}"
 
@@ -116,6 +116,9 @@ US=$'\x1f'
 # ---------------------------------------------------------------------------
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cura-biblioteca.XXXXXX")"
 cleanup() {
+  if declare -F rollback_plugin_transactions >/dev/null; then
+    rollback_plugin_transactions || true
+  fi
   rm -rf "$TMP_DIR"
   # so libera o lock se ESTE processo foi quem tomou (nunca mexe num lock de
   # outra execucao so porque o dir existe).
@@ -262,6 +265,8 @@ detect_python3() {
   fi
 }
 
+# O hash compara pacote e manifest; a confiança no publicador continua no TLS
+# do script/manifest. Não há assinatura criptográfica independente.
 verify_sha256() {
   local file="$1" expected="$2" actual
   actual="$(shasum -a 256 "$file" | awk '{print $1}')"
@@ -288,7 +293,7 @@ fetch_asset() {
     # instalador pra sempre, com a tela parada e sem nada pra ler. aborta se
     # ficar 60s abaixo de 1 KB/s — teto por velocidade, nao por tempo total
     # (o fonts.zip tem ~9 MB e um link lento porem saudavel nao pode estourar).
-    if ! curl -fsSL --retry 3 --connect-timeout 30 --speed-limit 1024 --speed-time 60 "$BASE_URL/$name" -o "$dest"; then
+    if ! curl --proto '=https' --proto-redir '=https' -fsSL --retry 3 --connect-timeout 30 --speed-limit 1024 --speed-time 60 "$BASE_URL/$name" -o "$dest"; then
       err "falha ao baixar $name — sem internet ou GitHub inacessível. log: $LOG_PATH. verifique sua conexão e rode o instalador de novo."
       exit 2
     fi
@@ -310,7 +315,7 @@ fetch_asset_optional() {
     cp "$src" "$dest" || return 1
     return 0
   fi
-  curl -fsSL --retry 3 --connect-timeout 30 --speed-limit 1024 --speed-time 60 "$BASE_URL/$name" -o "$dest" || return 1
+  curl --proto '=https' --proto-redir '=https' -fsSL --retry 3 --connect-timeout 30 --speed-limit 1024 --speed-time 60 "$BASE_URL/$name" -o "$dest" || return 1
   return 0
 }
 
@@ -327,7 +332,7 @@ fetch_absolute_url() {
     fi
     cp "$src" "$dest"
   else
-    if ! curl -fsSL --retry 3 --connect-timeout 30 --speed-limit 1024 --speed-time 60 "$url" -o "$dest"; then
+    if ! curl --proto '=https' --proto-redir '=https' -fsSL --retry 3 --connect-timeout 30 --speed-limit 1024 --speed-time 60 "$url" -o "$dest"; then
       err "falha ao baixar $url — sem internet ou GitHub inacessível. log: $LOG_PATH. verifique sua conexão e rode o instalador de novo."
       exit 2
     fi
@@ -897,6 +902,15 @@ write_snapshot() {
   else
     awk -f "$WRITE_SNAPSHOT_AWK" "$tsv" > "$SNAPSHOT_PATH.tmp"
   fi
+  # O journal identifica a troca atômica mesmo se a limpeza posterior falhar.
+  local receipt_sha txn
+  receipt_sha="$(shasum -a 256 "$SNAPSHOT_PATH.tmp" | awk '{print $1}')"
+  if [ "${#PLUGIN_TRANSACTIONS[@]}" -gt 0 ]; then
+    for txn in "${PLUGIN_TRANSACTIONS[@]}"; do
+      [ -d "$txn" ] || continue
+      printf '%s\n' "$receipt_sha" > "$txn/receipt.sha256"
+    done
+  fi
   mv -f "$SNAPSHOT_PATH.tmp" "$SNAPSHOT_PATH"
 }
 
@@ -1188,25 +1202,273 @@ cleanup_plugins_dir() {
   fi
 }
 
-# remove so as raizes de UM plugin (roots_csv), chamada logo antes do unzip
-# DAQUELE plugin especifico — nunca em bloco pra todos os plugins do manifest
-# de uma vez (fix blocker: download/sha falho de um plugin nao pode apagar a
-# copia antiga de OUTRO plugin, nem a dele proprio antes de saber que a nova
-# versao vai substitui-la com sucesso).
-cleanup_plugin_roots() {
-  local plugins_dir="$1" roots_csv="$2"
-  local name target old_ifs
-  old_ifs="$IFS"
-  IFS=','
+# Os backups ficam fora de Plugins e no mesmo filesystem. Só são descartados
+# depois de installed.json ser gravado: erro de escrita do recibo também reverte.
+PLUGIN_TRANSACTIONS=()
+PLUGIN_TRANSACTION_COMMITTED=0
+PLUGIN_ROLLBACK_FAILED=0
+
+is_cura_plugin_root() {
+  is_safe_leaf_name "$1" && [[ "$1" =~ ^cura_[A-Za-z0-9_.-]+$ ]]
+}
+
+prepare_plugin_payload() {
+  local archive="$1" roots_csv="$2" stage="$3" entry root name old_ifs
+  local roots=() entries="$TMP_DIR/plugin-entries.$$"
+  old_ifs="$IFS"; IFS=','
   for name in $roots_csv; do
-    is_safe_leaf_name "$name" || continue
-    target="$plugins_dir/$name"
-    if [ -e "$target" ]; then
-      rm -rf -- "$target"
-      log "removido (upgrade limpo): $target"
-    fi
+    is_cura_plugin_root "$name" || { IFS="$old_ifs"; return 1; }
+    roots+=("$name")
   done
   IFS="$old_ifs"
+  [ "${#roots[@]}" -gt 0 ] || return 1
+  unzip -tq "$archive" >/dev/null 2>&1 || return 1
+  unzip -Z1 "$archive" > "$entries" || return 1
+  # ZIPs de plugins só podem conter arquivos/diretórios sob os roots declarados.
+  # Links, traversal e colisões por caixa são recusados antes da extração.
+  unzip -Z -l "$archive" > "$TMP_DIR/plugin-modes.$$" || return 1
+  if LC_ALL=C grep -Eq '^l[rwx-]' "$TMP_DIR/plugin-modes.$$"; then return 1; fi
+  awk '{ k=tolower($0); sub(/\/$/, "", k); if (seen[k]++) exit 1 }' "$entries" || return 1
+  while IFS= read -r entry; do
+    case "$entry" in ''|/*|*\\*|*:*|../*|*/../*|*/..|./*|*/./*|*/.) return 1 ;; esac
+    LC_ALL=C printf '%s' "$entry" | LC_ALL=C grep -q '[[:cntrl:]]' && return 1
+    root="${entry%%/*}"
+    local found=0
+    for name in "${roots[@]}"; do [ "$root" != "$name" ] || found=1; done
+    [ "$found" = 1 ] || return 1
+  done < "$entries"
+  mkdir -p "$stage" || return 1
+  unzip -oq "$archive" -d "$stage" || return 1
+  [ -z "$(find "$stage" -type l -print -quit)" ] || return 1
+  for name in "${roots[@]}"; do [ -e "$stage/$name" ] || return 1; done
+}
+
+rollback_plugin_transaction() {
+  if rollback_plugin_transaction_impl "$1"; then
+    return 0
+  fi
+  PLUGIN_ROLLBACK_FAILED=1
+  return 1
+}
+
+rollback_plugin_transaction_impl() {
+  local txn="$1" plugins_dir name failed=0
+  [ -d "$txn" ] || return 0
+  plugins_dir="$(cat "$txn/plugins-path")" || return 1
+  local check="$plugins_dir"
+  while [ "$check" != / ]; do
+    [ ! -L "$check" ] || return 1
+    check="$(dirname "$check")"
+  done
+  local backup_links backup_file
+  backup_links="$(find "$txn/reference" "$txn/saved" -type l -print -quit)" || return 1
+  [ -z "$backup_links" ] || return 1
+  # Qualquer erro de leitura do backup ocorre antes de remover roots atuais.
+  find "$txn/reference" -type f -print0 > "$txn/rollback-files" || return 1
+  while IFS= read -r -d '' backup_file; do
+    shasum -a 256 "$backup_file" >/dev/null || return 1
+  done < "$txn/rollback-files"
+  local root_count=0
+  while IFS= read -r name; do
+    is_cura_plugin_root "$name" || return 1
+    root_count=$((root_count+1))
+  done < "$txn/roots"
+  [ "$root_count" -gt 0 ] || return 1
+  if pgrep -x SketchUp >/dev/null 2>&1; then
+    PLUGIN_ROLLBACK_FAILED=1
+    err "SketchUp aberto durante rollback; backup preservado em $txn. recuperação adiada até fechar o programa."
+    return 1
+  fi
+  while IFS= read -r name; do
+    is_cura_plugin_root "$name" || return 1
+    rm -rf -- "$plugins_dir/$name" || { failed=1; continue; }
+    if [ -e "$txn/reference/$name" ]; then
+      cp -pR "$txn/reference/$name" "$plugins_dir/$name" || { failed=1; continue; }
+      diff -qr "$txn/reference/$name" "$plugins_dir/$name" >/dev/null || failed=1
+    fi
+  done < "$txn/roots"
+  if [ "$failed" = 0 ]; then
+    log "rollback verificado dos plugins: $plugins_dir"
+    rm -rf -- "$txn" || return 1
+  else
+    PLUGIN_ROLLBACK_FAILED=1
+    err "rollback incompleto; backup preservado em $txn. feche o SketchUp e procure o suporte."
+  fi
+  [ "$failed" = 0 ]
+}
+
+rollback_plugin_transactions() {
+  [ "$PLUGIN_TRANSACTION_COMMITTED" = 0 ] || return 0
+  local txn failed=0 index
+  [ "${#PLUGIN_TRANSACTIONS[@]}" -gt 0 ] || return 0
+  # Desfaz a última alteração primeiro, inclusive se uma chamada direta
+  # introduziu sobreposição antes da validação do plano.
+  for ((index=${#PLUGIN_TRANSACTIONS[@]}-1; index>=0; index--)); do
+    txn="${PLUGIN_TRANSACTIONS[$index]}"
+    rollback_plugin_transaction "$txn" || failed=1
+  done
+  [ "$failed" = 0 ]
+}
+
+discard_committed_plugin_transaction() {
+  local txn="$1" completed
+  completed="$(dirname "$txn")/.cura-plugin-committed.${txn##*.}"
+  # A saída do namespace de recuperação vem antes da limpeza recursiva.
+  # Uma limpeza parcial nunca pode parecer rollback pendente no próximo run.
+  if mv "$txn" "$completed"; then
+    rm -rf -- "$completed" || log "backup temporário confirmado mantido em $completed"
+  else
+    log "backup confirmado mantido íntegro em $txn; limpeza será retentada"
+    return 1
+  fi
+}
+
+commit_plugin_transactions() {
+  [ "$PLUGIN_ROLLBACK_FAILED" = 0 ] || return 1
+  PLUGIN_TRANSACTION_COMMITTED=1
+  local txn
+  if [ "${#PLUGIN_TRANSACTIONS[@]}" -gt 0 ]; then
+    for txn in "${PLUGIN_TRANSACTIONS[@]}"; do
+      [ -d "$txn" ] || continue
+      discard_committed_plugin_transaction "$txn"
+    done
+  fi
+  PLUGIN_TRANSACTIONS=()
+}
+
+recover_pending_plugin_transactions() {
+  local plugins_dir="$1" txn recorded snapshot_path="${2:-${SNAPSHOT_PATH:-}}"
+  for txn in "$(dirname "$plugins_dir")"/.cura-plugin-transaction.*; do
+    [ -d "$txn" ] || continue
+    [ ! -L "$txn" ] || return 1
+    [ -f "$txn/ready" ] || continue
+    [ -f "$txn/plugins-path" ] && [ -f "$txn/roots" ] || return 1
+    recorded="$(cat "$txn/plugins-path")" || return 1
+    [ "$recorded" = "$plugins_dir" ] || return 1
+    if [ -n "$snapshot_path" ] && [ -f "$txn/receipt.sha256" ] && [ -f "$snapshot_path" ]; then
+      local actual_receipt_sha
+      actual_receipt_sha="$(shasum -a 256 "$snapshot_path" | awk '{print $1}')"
+      if [ "$(cat "$txn/receipt.sha256")" = "$actual_receipt_sha" ]; then
+        discard_committed_plugin_transaction "$txn" || return 1
+        continue
+      fi
+    fi
+    rollback_plugin_transaction "$txn" || return 1
+  done
+}
+
+old_plugin_roots_csv() {
+  local pi="$1" plugins_dir="$2" si old_path old_label result=""
+  for si in "${!SNAP_ITEM_PATHS[@]}"; do
+    old_path="${SNAP_ITEM_PATHS[$si]}"; old_label="${SNAP_ITEM_LABELS[$si]:-}"
+    case "$old_path" in "$plugins_dir"/cura_*) ;; *) continue ;; esac
+    case "$old_label" in
+      "plugin ${PLUGIN_NAMES[$pi]} v"*|"legado: plugin ${PLUGIN_NAMES[$pi]} v"*)
+        result="${result:+$result,}${old_path##*/}" ;;
+    esac
+  done
+  printf '%s' "$result"
+}
+
+plugin_plan_is_safe() {
+  local plugins_dir="$1" pi name seen_index old_csv combined old_ifs="$IFS"
+  local names=() owners=() keys=() key
+  for pi in "${!PLUGIN_IDS[@]}"; do
+    old_csv="$(old_plugin_roots_csv "$pi" "$plugins_dir")"
+    combined="${PLUGIN_ROOTS_CSV[$pi]}${old_csv:+,$old_csv}"
+    IFS=','
+    for name in $combined; do
+      is_cura_plugin_root "$name" || { IFS="$old_ifs"; return 1; }
+      key="$(printf '%s' "$name" | tr 'A-Z' 'a-z')"
+      for seen_index in "${!names[@]}"; do
+        if [ "${keys[$seen_index]}" = "$key" ]; then
+          if [ "${owners[$seen_index]}" != "$pi" ] || [ "${names[$seen_index]}" != "$name" ]; then
+            IFS="$old_ifs"; return 1
+          fi
+        fi
+      done
+      names+=("$name"); owners+=("$pi"); keys+=("$key")
+    done
+    IFS="$old_ifs"
+  done
+}
+
+install_plugin_transaction() {
+  local stage="$1" plugins_dir="$2" roots_csv="$3" old_roots_csv="${4:-}" txn name check old_ifs
+  local roots=()
+  old_ifs="$IFS"; IFS=','
+  for name in $roots_csv; do
+    is_cura_plugin_root "$name" || { IFS="$old_ifs"; return 1; }
+    roots+=("$name")
+  done
+  IFS="$old_ifs"
+  if [ -n "$old_roots_csv" ]; then
+    IFS=','
+    for name in $old_roots_csv; do
+      is_cura_plugin_root "$name" || { IFS="$old_ifs"; return 1; }
+      local found=0 existing
+      for existing in "${roots[@]}"; do
+        if [ "$(printf '%s' "$existing" | tr 'A-Z' 'a-z')" = "$(printf '%s' "$name" | tr 'A-Z' 'a-z')" ]; then
+          [ "$existing" = "$name" ] || { IFS="$old_ifs"; return 1; }
+          found=1
+        fi
+      done
+      [ "$found" = 1 ] || roots+=("$name")
+    done
+    IFS="$old_ifs"
+  fi
+  if [ "${#PLUGIN_TRANSACTIONS[@]}" -gt 0 ]; then
+    local pending pending_name
+    for pending in "${PLUGIN_TRANSACTIONS[@]}"; do
+      [ -f "$pending/plugins-path" ] || continue
+      [ "$(cat "$pending/plugins-path")" = "$plugins_dir" ] || continue
+      while IFS= read -r pending_name; do
+        for name in "${roots[@]}"; do
+          [ "$(printf '%s' "$pending_name" | tr 'A-Z' 'a-z')" != "$(printf '%s' "$name" | tr 'A-Z' 'a-z')" ] || return 1
+        done
+      done < "$pending/roots"
+    done
+  fi
+  # Um link em qualquer ancestral poderia redirecionar escrita para fora do perfil.
+  check="$plugins_dir"
+  while [ "$check" != / ]; do
+    [ ! -L "$check" ] || return 1
+    check="$(dirname "$check")"
+  done
+  txn="$(mktemp -d "$(dirname "$plugins_dir")/.cura-plugin-transaction.XXXXXX")" || return 1
+  mkdir -p "$txn/reference" "$txn/incoming" "$txn/saved" || { rm -rf -- "$txn"; return 1; }
+  printf '%s\n' "$plugins_dir" > "$txn/plugins-path" || { rm -rf -- "$txn"; return 1; }
+  printf '%s\n' "${roots[@]}" > "$txn/roots" || { rm -rf -- "$txn"; return 1; }
+  # Copia/valida tudo antes de tocar no que o SketchUp carrega.
+  for name in "${roots[@]}"; do
+    if [ -e "$plugins_dir/$name" ] || [ -L "$plugins_dir/$name" ]; then
+      if [ -L "$plugins_dir/$name" ] || [ -n "$(find "$plugins_dir/$name" -type l -print -quit)" ]; then
+        rm -rf -- "$txn"; return 1
+      fi
+      cp -pR "$plugins_dir/$name" "$txn/reference/$name" &&
+        diff -qr "$plugins_dir/$name" "$txn/reference/$name" >/dev/null || { rm -rf -- "$txn"; return 1; }
+    fi
+    if [ -e "$stage/$name" ]; then
+      cp -pR "$stage/$name" "$txn/incoming/$name" &&
+        diff -qr "$stage/$name" "$txn/incoming/$name" >/dev/null || { rm -rf -- "$txn"; return 1; }
+    fi
+  done
+  # Rechecagem por substituição, inclusive entre versões do SketchUp.
+  if pgrep -x SketchUp >/dev/null 2>&1; then
+    log "SketchUp aberto antes da substituição; plugin adiado"
+    rm -rf -- "$txn"; return 1
+  fi
+  : > "$txn/ready" || { rm -rf -- "$txn"; return 1; }
+  PLUGIN_TRANSACTIONS+=("$txn")
+  for name in "${roots[@]}"; do
+    if [ -e "$plugins_dir/$name" ]; then
+      mv "$plugins_dir/$name" "$txn/saved/$name" || { rollback_plugin_transaction "$txn"; return 1; }
+    fi
+    if [ -e "$txn/incoming/$name" ]; then
+      mv "$txn/incoming/$name" "$plugins_dir/$name" &&
+        diff -qr "$stage/$name" "$plugins_dir/$name" >/dev/null || { rollback_plugin_transaction "$txn"; return 1; }
+    fi
+  done
 }
 
 # ---------------------------------------------------------------------------
@@ -1249,7 +1511,7 @@ register_updater() {
   <array>
     <string>/bin/bash</string>
     <string>-c</string>
-    <string>curl -fsSL $DEFAULT_BASE_URL/install.sh | /bin/bash -s -- --quiet</string>
+    <string>curl --proto '=https' --proto-redir '=https' -fsSL $DEFAULT_BASE_URL/install.sh | /bin/bash -s -- --quiet</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -1371,6 +1633,12 @@ do_install() {
     case "$year" in
       '' | *[!0-9]*) continue ;;
     esac
+    if [ -d "$d/SketchUp/Plugins" ]; then
+      if ! recover_pending_plugin_transactions "$d/SketchUp/Plugins"; then
+        err "recuperação pendente de plugins; nenhuma nova atualização iniciada. log: $LOG_PATH."
+        exit 2
+      fi
+    fi
     if [ "$year" -ge "$MIN_SKETCHUP" ]; then
       plugins_dir="$d/SketchUp/Plugins"
       mkdir -p "$plugins_dir"
@@ -1476,24 +1744,32 @@ do_install() {
     # download + verificacao de cada plugin (1x, independente de quantas
     # versoes do SketchUp existam)
     mkdir -p "$TMP_DIR/payload"
-    local PLUGIN_OK=()
+    local PLUGIN_OK=() PLUGIN_INSTALLED_COUNTS=()
     local i file url sha_expected dest
     for i in "${!PLUGIN_IDS[@]}"; do
       file="${PLUGIN_FILES[$i]}"
       url="${PLUGIN_URLS[$i]}"
       sha_expected="${PLUGIN_SHA256S[$i]}"
       dest="$TMP_DIR/payload/$file"
+      PLUGIN_INSTALLED_COUNTS+=(0)
 
+      if ! is_safe_leaf_name "$file"; then
+        PLUGIN_OK+=("0"); HAD_ERROR=1; continue
+      fi
       if [ -n "$url" ]; then
-        fetch_absolute_url "$url" "$dest"
-      else
-        fetch_asset "$file" "$dest"
+        if ! (fetch_absolute_url "$url" "$dest"); then
+          PLUGIN_OK+=("0"); HAD_ERROR=1; continue
+        fi
+      elif ! fetch_asset_optional "$file" "$dest"; then
+        err "falha ao baixar $file; cópia anterior preservada."
+        PLUGIN_OK+=("0"); HAD_ERROR=1; continue
       fi
 
-      if verify_sha256 "$dest" "$sha_expected"; then
+      if verify_sha256 "$dest" "$sha_expected" &&
+        prepare_plugin_payload "$dest" "${PLUGIN_ROOTS_CSV[$i]}" "$TMP_DIR/plugin-stage-$i"; then
         PLUGIN_OK+=("1")
       else
-        err "arquivo $file corrompido no download (sha256 não confere) — ${PLUGIN_NAMES[$i]} não instalado. log: $LOG_PATH. tente rodar o instalador de novo mais tarde."
+        err "arquivo $file inválido (sha256 ou estrutura do ZIP) — ${PLUGIN_NAMES[$i]} não instalado. log: $LOG_PATH. tente rodar o instalador de novo mais tarde."
         PLUGIN_OK+=("0")
         HAD_ERROR=1
       fi
@@ -1512,33 +1788,35 @@ do_install() {
       wait_sketchup_closed
     fi
 
-    # por versao: limpeza da lista remove (incondicional) + por plugin, so
-    # remove a raiz antiga e reinstala se o download/sha desta rodada foi ok
-    # (fix blocker: download/sha falho nao pode apagar a copia antiga que
-    # ainda funciona — ela fica intacta e a proxima rodada tenta de novo)
+    # A lista histórica remove já incluiu plugins de terceiros. Atualização
+    # automática só substitui os roots CURA validados; limpeza segue --limpar.
     local vi year_v plugins_dir_v pi root_name root_path
     for vi in "${!VERSION_YEARS[@]}"; do
       year_v="${VERSION_YEARS[$vi]}"
       plugins_dir_v="${VERSION_DIRS[$vi]}"
-      cleanup_plugins_dir "$plugins_dir_v" "$year_v"
-
+      if ! plugin_plan_is_safe "$plugins_dir_v"; then
+        err "plano de plugins inválido (roots sobrepostos ou fora do CURA); SketchUp $year_v preservado."
+        HAD_ERROR=1
+        continue
+      fi
       for pi in "${!PLUGIN_IDS[@]}"; do
         if [ "${PLUGIN_OK[$pi]}" = "1" ]; then
-          cleanup_plugin_roots "$plugins_dir_v" "${PLUGIN_ROOTS_CSV[$pi]}"
-          unzip -oq "$TMP_DIR/payload/${PLUGIN_FILES[$pi]}" -d "$plugins_dir_v"
-          log "instalado: ${PLUGIN_NAMES[$pi]} v${PLUGIN_VERSIONS[$pi]} em SketchUp $year_v"
-
+          local old_roots_csv
+          old_roots_csv="$(old_plugin_roots_csv "$pi" "$plugins_dir_v")"
+          if ! install_plugin_transaction "$TMP_DIR/plugin-stage-$pi" "$plugins_dir_v" "${PLUGIN_ROOTS_CSV[$pi]}" "$old_roots_csv"; then
+            err "falha ao substituir ${PLUGIN_NAMES[$pi]} em SketchUp $year_v; versão anterior preservada ou restaurada."
+            HAD_ERROR=1
+            [ "$PLUGIN_ROLLBACK_FAILED" = 0 ] || exit 2
+            continue
+          fi
+          PLUGIN_INSTALLED_COUNTS[$pi]=$(( ${PLUGIN_INSTALLED_COUNTS[$pi]} + 1 ))
+          log "instalado e verificado: ${PLUGIN_NAMES[$pi]} v${PLUGIN_VERSIONS[$pi]} em SketchUp $year_v"
           local old_ifs="$IFS"
           IFS=','
           for root_name in ${PLUGIN_ROOTS_CSV[$pi]}; do
-            # mesma guarda do cleanup_plugin_roots: esta expansao e sem aspas
-            # (pro IFS quebrar o CSV) e portanto tambem faz glob.
-            is_safe_leaf_name "$root_name" || continue
             root_path="$plugins_dir_v/$root_name"
-            if [ -e "$root_path" ]; then
-              ITEM_LABELS+=("plugin ${PLUGIN_NAMES[$pi]} v${PLUGIN_VERSIONS[$pi]} (SketchUp $year_v)")
-              ITEM_PATHS+=("$root_path")
-            fi
+            ITEM_LABELS+=("plugin ${PLUGIN_NAMES[$pi]} v${PLUGIN_VERSIONS[$pi]} (SketchUp $year_v)")
+            ITEM_PATHS+=("$root_path")
           done
           IFS="$old_ifs"
         fi
@@ -1708,13 +1986,29 @@ do_install() {
       if [ "$in_scope" = "0" ] && [ "$PHOTOSHOP_INSTALLED_COUNT" -gt 0 ]; then
         case "$snap_p" in "$PHOTOSHOP_DIR"/*) in_scope=1 ;; esac
       fi
-      if [ "$in_scope" = "0" ] && [ "${#VERSION_DIRS[@]}" -gt 0 ]; then
+      # Roots antigos só saem dentro da transação do próprio plugin. Um
+      # recibo legado não autoriza apagar terceiros/raízes sem correspondência.
+      local plugin_receipt=0
+      if [ "${#VERSION_DIRS[@]}" -gt 0 ]; then
         for vd in "${VERSION_DIRS[@]}"; do
-          case "$snap_p" in "$vd"/*) in_scope=1; break ;; esac
+          case "$snap_p" in "$vd"/*) plugin_receipt=1; break ;; esac
         done
+      fi
+      if [ "$plugin_receipt" = 1 ]; then
+        if [ -e "$snap_p" ]; then
+          ITEM_LABELS+=("$snap_lbl")
+          ITEM_PATHS+=("$snap_p")
+        fi
+        continue
       fi
 
       if [ "$in_scope" = "1" ]; then
+        # Falha/adiamento não transforma os roots antigos em órfãos.
+        if [ "$HAD_ERROR" = "1" ] && [ -e "$snap_p" ]; then
+          ITEM_LABELS+=("$snap_lbl")
+          ITEM_PATHS+=("$snap_p")
+          continue
+        fi
         if [ "$HAD_ERROR" = "0" ] && is_allowed_removal_path "$snap_p" && [ -e "$snap_p" ]; then
           rm -rf -- "$snap_p"
           log "removido (saiu desta versão da biblioteca): $snap_p"
@@ -1744,6 +2038,7 @@ do_install() {
   fi
 
   write_snapshot
+  commit_plugin_transactions
 
   # resumo final (sem separador no stdout em quiet)
   if [ "$QUIET" != "1" ]; then
@@ -1778,7 +2073,7 @@ do_install() {
 
   local ok_plugins_desc="" first=1 piece
   for i in "${!PLUGIN_IDS[@]}"; do
-    if [ "${PLUGIN_OK[$i]}" = "1" ]; then
+    if [ "${PLUGIN_INSTALLED_COUNTS[$i]:-0}" -gt 0 ]; then
       piece="${PLUGIN_NAMES[$i]} v${PLUGIN_VERSIONS[$i]}"
       if [ "$first" = "1" ]; then
         ok_plugins_desc="$piece"
@@ -1817,7 +2112,7 @@ do_install() {
   if [ -z "$ok_plugins_desc" ]; then
     msg="nenhum plugin instalado (falha de integridade) em ${#VERSION_YEARS[@]} ${ver_word} do SketchUp (${versions_desc})${fonts_suffix}. log: $LOG_PATH.${skipped_note}${photoshop_note}"
   else
-    msg="instalado: ${ok_plugins_desc} em ${#VERSION_YEARS[@]} ${ver_word} do SketchUp (${versions_desc})${fonts_suffix}. log: $LOG_PATH.${skipped_note}${photoshop_note} abra o SketchUp e confira o menu Extensões. ${BETA_NOTE}"
+    msg="instalado e verificado: ${ok_plugins_desc}. SketchUp detectado: ${versions_desc}${fonts_suffix}. log: $LOG_PATH.${skipped_note}${photoshop_note} abra o SketchUp e confira o menu Extensões. ${BETA_NOTE}"
   fi
 
   if [ "$HAD_ERROR" = "1" ]; then

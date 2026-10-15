@@ -32,7 +32,7 @@ param(
     # -Limpar: "limpar SketchUp". Move todo plugin de terceiro pra uma pasta de
     # recuperação em Documentos, preservando só o cura. Não instala nada.
     [switch]$Limpar,
-    [string]$BaseUrl = $(if ($env:CURA_BASE_URL) { $env:CURA_BASE_URL } else { "https://github.com/joaotegoni/cura-biblioteca/releases/latest/download" })
+    [string]$BaseUrl = $(if ($env:CURA_BASE_URL) { $env:CURA_BASE_URL } else { "https://github.com/cura-studio/cura-biblioteca/releases/latest/download" })
 )
 
 # --- WOW64: o Setup.exe do Inno é 32-bit, então este script nasce em SysWOW64
@@ -63,13 +63,14 @@ if ($env:PROCESSOR_ARCHITECTURE -eq 'x86' -and [Environment]::Is64BitOperatingSy
 # URL FIXA da release oficial — usada só pelo registro do auto-update. Nunca
 # usa $BaseUrl aqui: o updater tem que puxar sempre da release de verdade,
 # mesmo que esta execução esteja com CURA_BASE_URL apontando pasta de teste.
-$script:OfficialBaseUrl = "https://github.com/joaotegoni/cura-biblioteca/releases/latest/download"
+$script:OfficialBaseUrl = "https://github.com/cura-studio/cura-biblioteca/releases/latest/download"
 $script:UpdaterTaskName = "CURA Biblioteca Updater"
 # Marcado por Register-CuraUpdater quando o registro do auto-update falha
 # (schtasks/Register-ScheduledTask negado por política corporativa etc). O
 # resumo final do passo 11 lê esta flag pra avisar o aluno - sem isso a
 # máquina fica muda pra sempre e nunca recebe release nova.
 $script:UpdaterFailed = $false
+$script:PluginTransactions = @()
 # Chave de fontes per-user. Escopo de SCRIPT de propósito: o -Uninstall roda e
 # sai muito antes do bloco de fontes, então uma variável criada lá embaixo
 # chegaria $null na remoção.
@@ -186,6 +187,43 @@ function Resolve-CuraLocalPath {
     return $null
 }
 
+function New-CuraHttpsRequest {
+    param([uri]$Uri, [int]$TimeoutSec)
+    $request = [Net.HttpWebRequest]::Create($Uri)
+    $request.AllowAutoRedirect = $false
+    $request.Timeout = $TimeoutSec * 1000
+    $request.ReadWriteTimeout = $TimeoutSec * 1000
+    return $request
+}
+
+function Receive-CuraHttpsFile {
+    # TLS autentica o host; sha256 do mesmo manifest não é assinatura independente.
+    param([string]$Url, [string]$OutFile, [int]$TimeoutSec = 30)
+    $uri = [uri]$Url
+    for ($redirect = 0; $redirect -le 10; $redirect++) {
+        if (-not $uri.IsAbsoluteUri -or $uri.Scheme -ne 'https') { throw 'download exige HTTPS, inclusive redirecionamentos' }
+        $request = New-CuraHttpsRequest -Uri $uri -TimeoutSec $TimeoutSec
+        $response = $request.GetResponse()
+        try {
+            $status = [int]$response.StatusCode
+            if ($status -in @(301, 302, 303, 307, 308)) {
+                $location = $response.Headers['Location']
+                if (-not $location) { throw 'redirecionamento sem Location' }
+                $uri = [uri]::new($uri, [string]$location)
+                continue
+            }
+            if ($status -lt 200 -or $status -ge 300) { throw "HTTP $status" }
+            $inputStream = $response.GetResponseStream()
+            try {
+                $outputStream = [IO.File]::Open($OutFile, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+                try { $inputStream.CopyTo($outputStream) } finally { $outputStream.Dispose() }
+            } finally { $inputStream.Dispose() }
+            return
+        } finally { $response.Dispose() }
+    }
+    throw 'limite de redirecionamentos HTTPS excedido'
+}
+
 function Get-CuraRemoteFile {
     param(
         [Parameter(Mandatory = $true)][string]$Url,
@@ -203,7 +241,7 @@ function Get-CuraRemoteFile {
     while ($attempt -lt $Retries) {
         $attempt++
         try {
-            Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing -TimeoutSec $TimeoutSec
+            Receive-CuraHttpsFile -Url $Url -OutFile $OutFile -TimeoutSec $TimeoutSec
             return $true
         } catch {
             $lastMessage = $_.Exception.Message
@@ -372,6 +410,247 @@ function Get-CuraOldSnapshot {
         }
     }
     return $null
+}
+
+function Test-CuraPluginRoot {
+    param([string]$Name)
+    return (($Name -cmatch '^cura_[A-Za-z0-9_.-]+$') -and ($Name -notmatch '\.\.'))
+}
+
+function Get-CuraPluginTreeSignature {
+    param([string]$Path)
+    $root = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    $items = @($root)
+    if ($root.PSIsContainer) { $items += @(Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction Stop) }
+    $lines = foreach ($item in $items) {
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "link recusado: $($item.FullName)" }
+        $relative = $item.FullName.Substring($root.FullName.Length)
+        if ($item.PSIsContainer) { "D $relative" } else { "F $relative $((Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash)" }
+    }
+    return (($lines | Sort-Object) -join "`n")
+}
+
+function Prepare-CuraPluginPayload {
+    param($Plugin, [string]$Archive, [string]$Stage)
+    $roots = @($Plugin.roots)
+    if (-not $roots.Count) { throw 'plugin sem roots' }
+    foreach ($root in $roots) { if (-not (Test-CuraPluginRoot $root)) { throw "root recusado: $root" } }
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [IO.Compression.ZipFile]::OpenRead($Archive)
+    try {
+        $seen = @{}
+        foreach ($entry in $zip.Entries) {
+            $name = $entry.FullName
+            if ($name -match '[\\:*?"<>|\x00-\x1f]' -or $name.StartsWith('/') -or $name -match '(^|/)\.\.?(/|$)' -or $name -match '[. ](/|$)' -or $name -match '//') { throw "entrada ZIP recusada: $name" }
+            $key = $name.TrimEnd('/').ToLowerInvariant()
+            if (-not $key -or $seen.ContainsKey($key)) { throw "entrada ZIP duplicada/vazia: $name" }
+            $seen[$key] = $true
+            if ($roots -cnotcontains $name.Split('/')[0]) { throw "entrada fora dos roots: $name" }
+            if ((($entry.ExternalAttributes -shr 16) -band 0xF000) -eq 0xA000 -or ($entry.ExternalAttributes -band 0x400) -ne 0) { throw "link ZIP recusado: $name" }
+        }
+    } finally { $zip.Dispose() }
+    New-Item -ItemType Directory -Path $Stage -Force | Out-Null
+    Expand-Archive -LiteralPath $Archive -DestinationPath $Stage -Force -ErrorAction Stop
+    foreach ($root in $roots) { $null = Get-CuraPluginTreeSignature (Join-Path $Stage $root) }
+}
+
+function Undo-CuraPluginTransaction {
+    param($Transaction, [string]$LogPath)
+    if (-not (Test-Path -LiteralPath $Transaction.Path)) { return }
+    if (Get-Process -Name 'SketchUp*' -ErrorAction SilentlyContinue) {
+        throw "SketchUp aberto durante rollback; backup preservado em $($Transaction.Path); recuperação adiada até fechar o programa"
+    }
+    foreach ($root in $Transaction.Roots) { if (-not (Test-CuraPluginRoot $root)) { throw 'journal de rollback com root inválido' } }
+    $check = Get-Item -LiteralPath $Transaction.PluginsPath -Force -ErrorAction Stop
+    while ($null -ne $check) {
+        if (($check.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'ancestral com link no rollback' }
+        $check = $check.Parent
+    }
+    foreach ($part in @('reference', 'saved')) { $null = Get-CuraPluginTreeSignature (Join-Path $Transaction.Path $part) }
+    try {
+        foreach ($root in $Transaction.Roots) {
+            $target = Join-Path $Transaction.PluginsPath $root
+            $reference = Join-Path $Transaction.Path "reference/$root"
+            $saved = Join-Path $Transaction.Path "saved/$root"
+            if ((Test-Path -LiteralPath $reference) -and (-not (Test-Path -LiteralPath $saved)) -and (Test-Path -LiteralPath $target)) {
+                if ((Get-CuraPluginTreeSignature $target) -eq (Get-CuraPluginTreeSignature $reference)) { continue }
+            }
+            if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Stop }
+            if (Test-Path -LiteralPath $saved) {
+                Move-Item -LiteralPath $saved -Destination $target -ErrorAction Stop
+            } elseif (Test-Path -LiteralPath $reference) {
+                Copy-Item -LiteralPath $reference -Destination $target -Recurse -Force -ErrorAction Stop
+            }
+            if (Test-Path -LiteralPath $reference) {
+                if ((Get-CuraPluginTreeSignature $target) -ne (Get-CuraPluginTreeSignature $reference)) { throw "rollback divergiu: $root" }
+            } elseif (Test-Path -LiteralPath $target) { throw "rollback deixou root novo: $root" }
+        }
+        [IO.Directory]::Delete($Transaction.Path, $true)
+        $script:PluginTransactions = @($script:PluginTransactions | Where-Object { $_.Path -ne $Transaction.Path })
+        Write-CuraLog -LogPath $LogPath -Message "rollback verificado dos plugins: $($Transaction.PluginsPath)"
+    } catch {
+        throw "rollback incompleto; backup preservado em $($Transaction.Path): $($_.Exception.Message)"
+    }
+}
+
+function Undo-CuraPluginTransactions {
+    param([string]$LogPath)
+    $pending = @($script:PluginTransactions)
+    for ($index = $pending.Count - 1; $index -ge 0; $index--) {
+        Undo-CuraPluginTransaction -Transaction $pending[$index] -LogPath $LogPath
+    }
+}
+
+function Save-CuraSnapshot {
+    param($Snapshot, [string]$SnapshotPath)
+    $temporary = "$SnapshotPath.tmp"
+    $Snapshot | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $temporary -Encoding UTF8 -ErrorAction Stop
+    $receiptHash = (Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash
+    foreach ($transaction in @($script:PluginTransactions)) {
+        if (Test-Path -LiteralPath $transaction.Path) {
+            [IO.File]::WriteAllText((Join-Path $transaction.Path 'receipt.sha256'), $receiptHash)
+        }
+    }
+    if ([IO.File]::Exists($SnapshotPath)) {
+        # Replace usa rename no mesmo filesystem, sem apagar primeiro o recibo.
+        [IO.File]::Replace($temporary, $SnapshotPath, [NullString]::Value)
+    } else {
+        [IO.File]::Move($temporary, $SnapshotPath)
+    }
+}
+
+function Remove-CuraCommittedPluginTransaction {
+    param($Transaction)
+    $completed = Join-Path (Split-Path $Transaction.Path -Parent) ('.cura-plugin-committed-' + [guid]::NewGuid().ToString('N'))
+    # Falha ao classificar impede novo update: o recibo já confirma sucesso,
+    # portanto esse backup jamais deve ser confundido com rollback pendente.
+    [IO.Directory]::Move($Transaction.Path, $completed)
+    try { [IO.Directory]::Delete($completed, $true) }
+    catch { Write-Warning "backup temporário confirmado mantido em $completed" }
+}
+
+function Complete-CuraPluginTransactions {
+    # Só após a escrita efetiva de installed.json. Nunca apaga estado de identidade.
+    $confirmed = @($script:PluginTransactions)
+    $script:PluginTransactions = @()
+    foreach ($transaction in $confirmed) {
+        Remove-CuraCommittedPluginTransaction -Transaction $transaction
+    }
+}
+
+function Restore-CuraPendingPluginTransactions {
+    param([string]$PluginsPath, [string]$LogPath, [string]$SnapshotPath)
+    $parent = Split-Path $PluginsPath -Parent
+    if (-not (Test-Path -LiteralPath $parent)) { return }
+    foreach ($directory in @(Get-ChildItem -LiteralPath $parent -Directory -Force | Where-Object Name -like '.cura-plugin-transaction-*')) {
+        if (($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'journal de rollback em link recusado' }
+        $journal = Join-Path $directory.FullName 'transaction.json'
+        if (-not (Test-Path -LiteralPath $journal)) { continue }
+        $transaction = Get-Content -LiteralPath $journal -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($transaction.Path -ne $directory.FullName -or $transaction.PluginsPath -ne $PluginsPath) { throw 'journal de rollback fora do diretório esperado' }
+        $receiptHashPath = Join-Path $directory.FullName 'receipt.sha256'
+        if ($SnapshotPath -and (Test-Path -LiteralPath $SnapshotPath) -and (Test-Path -LiteralPath $receiptHashPath)) {
+            $expected = [IO.File]::ReadAllText($receiptHashPath)
+            if ($expected -eq (Get-FileHash -LiteralPath $SnapshotPath -Algorithm SHA256).Hash) {
+                Remove-CuraCommittedPluginTransaction -Transaction $transaction
+                continue
+            }
+        }
+        Undo-CuraPluginTransaction -Transaction $transaction -LogPath $LogPath
+    }
+}
+
+function Get-CuraPresentPluginReceipts {
+    param($Plugins, [string]$PluginsPath)
+    foreach ($plugin in $Plugins) {
+        foreach ($root in $plugin.roots) {
+            if ((Test-CuraPluginRoot $root) -and (Test-Path -LiteralPath (Join-Path $PluginsPath $root))) {
+                # Um root ausente não torna os arquivos restantes órfãos.
+                $plugin
+                break
+            }
+        }
+    }
+}
+
+function Test-CuraPluginPlan {
+    param($Plugins, $OldPlugins)
+    $owners = @{}
+    $spellings = @{}
+    for ($index = 0; $index -lt @($Plugins).Count; $index++) {
+        $plugin = $Plugins[$index]
+        $oldRoots = @($OldPlugins | Where-Object { $_.id -eq $plugin.id } | ForEach-Object { $_.roots })
+        foreach ($root in @(@($plugin.roots) + $oldRoots | Select-Object -Unique)) {
+            if (-not (Test-CuraPluginRoot $root)) { return $false }
+            if ($owners.ContainsKey($root)) {
+                if ($owners[$root] -ne $index -or $spellings[$root] -cne $root) { return $false }
+            }
+            $owners[$root] = $index
+            $spellings[$root] = $root
+        }
+    }
+    return $true
+}
+
+function Install-CuraPluginTransaction {
+    param([string]$Stage, [string]$PluginsPath, [string[]]$Roots, [string[]]$OldRoots, [string]$LogPath)
+    $allRoots = @(@($Roots) + @($OldRoots) | Select-Object -Unique)
+    $spellings = @{}
+    foreach ($root in @($Roots) + @($OldRoots)) {
+        if (-not (Test-CuraPluginRoot $root)) { throw "root recusado: $root" }
+        if ($spellings.ContainsKey($root) -and $spellings[$root] -cne $root) { throw 'roots com colisão de caixa recusados' }
+        $spellings[$root] = $root
+    }
+    foreach ($pending in @($script:PluginTransactions)) {
+        if ($pending.PluginsPath -ne $PluginsPath) { continue }
+        foreach ($root in $allRoots) {
+            if ($pending.Roots -contains $root) { throw "transação sobreposta recusada: $root" }
+        }
+    }
+    $check = Get-Item -LiteralPath $PluginsPath -Force -ErrorAction Stop
+    while ($null -ne $check) {
+        if (($check.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "ancestral com link recusado: $($check.FullName)" }
+        $check = $check.Parent
+    }
+    $txnPath = Join-Path (Split-Path $PluginsPath -Parent) ('.cura-plugin-transaction-' + [guid]::NewGuid().ToString('N'))
+    $transaction = [PSCustomObject]@{ Path = $txnPath; PluginsPath = $PluginsPath; Roots = $allRoots }
+    $mutating = $false
+    try {
+        foreach ($part in @('reference', 'incoming', 'saved')) { New-Item -ItemType Directory -Path (Join-Path $txnPath $part) -Force | Out-Null }
+        foreach ($root in $allRoots) {
+            $target = Join-Path $PluginsPath $root
+            if (Test-Path -LiteralPath $target) {
+                $before = Get-CuraPluginTreeSignature $target
+                $reference = Join-Path $txnPath "reference/$root"
+                Copy-Item -LiteralPath $target -Destination $reference -Recurse -Force -ErrorAction Stop
+                if ((Get-CuraPluginTreeSignature $reference) -ne $before) { throw "backup divergiu: $root" }
+            }
+        }
+        foreach ($root in $Roots) {
+            $source = Join-Path $Stage $root
+            $incoming = Join-Path $txnPath "incoming/$root"
+            Copy-Item -LiteralPath $source -Destination $incoming -Recurse -Force -ErrorAction Stop
+            if ((Get-CuraPluginTreeSignature $source) -ne (Get-CuraPluginTreeSignature $incoming)) { throw "staging divergiu: $root" }
+        }
+        if (Get-Process -Name 'SketchUp*' -ErrorAction SilentlyContinue) { throw 'SketchUp aberto antes da substituição; plugin adiado' }
+        $transaction | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $txnPath 'transaction.json') -Encoding UTF8 -ErrorAction Stop
+        $script:PluginTransactions += $transaction
+        $mutating = $true
+        foreach ($root in $allRoots) {
+            $target = Join-Path $PluginsPath $root
+            if (Test-Path -LiteralPath $target) { Move-Item -LiteralPath $target -Destination (Join-Path $txnPath "saved/$root") -ErrorAction Stop }
+            if ($Roots -contains $root) {
+                Move-Item -LiteralPath (Join-Path $txnPath "incoming/$root") -Destination $target -ErrorAction Stop
+                if ((Get-CuraPluginTreeSignature $target) -ne (Get-CuraPluginTreeSignature (Join-Path $Stage $root))) { throw "instalação divergiu: $root" }
+            }
+        }
+        return $true
+    } catch {
+        Write-CuraLog -LogPath $LogPath -Message "erro / substituição não concluída: $($_.Exception.Message)" -IsError
+        if ($mutating) { Undo-CuraPluginTransaction -Transaction $transaction -LogPath $LogPath }
+        elseif (Test-Path -LiteralPath $txnPath) { [IO.Directory]::Delete($txnPath, $true) }
+        return $false
+    }
 }
 
 function Wait-CuraSketchUpClosed {
@@ -644,11 +923,19 @@ function Register-CuraUpdater {
         # {localappdata}\CURA-Biblioteca\install.ps1 (se o dir existir), pra
         # que o uninstall do Inno (que roda essa cópia congelada) também
         # receba fixes futuros.
+        $requestFunction = ${function:New-CuraHttpsRequest}.ToString()
+        $receiveFunction = ${function:Receive-CuraHttpsFile}.ToString()
         $inner = @"
+function New-CuraHttpsRequest {
+$requestFunction
+}
+function Receive-CuraHttpsFile {
+$receiveFunction
+}
 [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
 `$u='$OfficialBaseUrl/install.ps1'
 `$o=Join-Path `$env:TEMP 'cura-updater.ps1'
-try { Invoke-WebRequest -Uri `$u -OutFile `$o -UseBasicParsing -TimeoutSec 60 -ErrorAction Stop } catch { exit 0 }
+try { Receive-CuraHttpsFile -Url `$u -OutFile `$o -TimeoutSec 60 } catch { exit 0 }
 & powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `$o -Quiet
 `$code = `$LASTEXITCODE
 if (`$code -eq 0 -or `$code -eq 1 -or `$code -eq 2 -or `$code -eq 3) {
@@ -1076,6 +1363,9 @@ try {
         # PowerShell 5.1 "desembrulha" coleção de 1 elemento no retorno de
         # função, o que quebraria .Count mais abaixo).
         $allVersions = @(Get-CuraSketchUpVersions -MinVersion 0)
+        foreach ($detectedVersion in $allVersions) {
+            Restore-CuraPendingPluginTransactions -PluginsPath $detectedVersion.PluginsPath -LogPath $LogPath -SnapshotPath $SnapshotPath
+        }
         $versions = @($allVersions | Where-Object { $_.Year -ge $manifest.min_sketchup })
         # versões antigas demais pro release atual: não recebem plugin, mas
         # precisam aparecer na mensagem final - senão o aluno cujo único
@@ -1104,6 +1394,7 @@ try {
         }
 
         $snapshotVersions = @()
+        $successfulPluginInstalls = @()
 
         if ($noSketchUpFound) {
             Write-CuraLog -LogPath $LogPath -Message "aviso: nenhuma instalação do SketchUp (>= $($manifest.min_sketchup)) foi encontrada. instalando somente as fontes; instale o SketchUp e rode este instalador de novo para os plugins."
@@ -1111,6 +1402,7 @@ try {
             # --- 7a. Baixa e verifica cada payload de plugin uma única vez ---
             $verifiedPlugins = @()
             foreach ($plugin in $manifest.plugins) {
+                if (-not (Test-CuraSafeLeafName $plugin.file)) { $hadErrors = $true; continue }
                 $destFile = Join-Path $TempDir $plugin.file
                 $ok = Get-CuraPluginPayload -Plugin $plugin -BaseUrl $BaseUrl -OutFile $destFile -LogPath $LogPath
                 if (-not $ok) {
@@ -1124,11 +1416,18 @@ try {
                     $hadErrors = $true
                     continue
                 }
-                # Expand-Archive só aceita .zip - copia o .rbz pra .zip antes
-                $zipPath = Join-Path $TempDir ([System.IO.Path]::GetFileNameWithoutExtension($plugin.file) + ".zip")
-                Copy-Item -LiteralPath $destFile -Destination $zipPath -Force
-                $verifiedPlugins += [PSCustomObject]@{ Plugin = $plugin; ZipPath = $zipPath }
-                Write-CuraLog -LogPath $LogPath -Message "payload verificado: $($plugin.name) v$($plugin.version) (sha256 ok)"
+                try {
+                    # Extração/validação completa antes de qualquer remoção.
+                    $zipPath = Join-Path $TempDir ([guid]::NewGuid().ToString('N') + '.zip')
+                    Copy-Item -LiteralPath $destFile -Destination $zipPath -Force
+                    $stagePath = Join-Path $TempDir ([guid]::NewGuid().ToString('N') + '-stage')
+                    Prepare-CuraPluginPayload -Plugin $plugin -Archive $zipPath -Stage $stagePath
+                    $verifiedPlugins += [PSCustomObject]@{ Plugin = $plugin; StagePath = $stagePath }
+                    Write-CuraLog -LogPath $LogPath -Message "payload validado e extraído: $($plugin.name) v$($plugin.version)"
+                } catch {
+                    Write-CuraLog -LogPath $LogPath -Message "erro / pacote inválido: $($_.Exception.Message); cópia anterior preservada." -IsError
+                    $hadErrors = $true
+                }
             }
 
             # --- 6. Re-checa SketchUp antes da 1ª remoção/Expand-Archive: o
@@ -1142,51 +1441,32 @@ try {
                     New-Item -ItemType Directory -Path $ver.PluginsPath -Force | Out-Null
                 }
 
-                # Lista `remove` (plugins mortos) é incondicional - independe
-                # de $verifiedPlugins.
-                foreach ($name in $manifest.remove) {
-                    Remove-CuraExact -ParentDir $ver.PluginsPath -Name $name -LogPath $LogPath
-                }
-
+                # A lista histórica remove incluiu terceiros; a atualização só
+                # substitui roots CURA validados. Limpeza permanece ação explícita.
                 $installedPluginsForVersion = @()
+                $oldPlugins = @()
+                if ($null -ne $oldSnapshot) {
+                    foreach ($oldVer in @($oldSnapshot.sketchup_versions)) {
+                        if (($oldVer.year -eq $ver.Year) -and ($oldVer.plugins_path -eq $ver.PluginsPath)) {
+                            $oldPlugins = @($oldVer.plugins)
+                            $installedPluginsForVersion = @(Get-CuraPresentPluginReceipts -Plugins $oldPlugins -PluginsPath $ver.PluginsPath)
+                        }
+                    }
+                }
+                if (-not (Test-CuraPluginPlan -Plugins @($manifest.plugins) -OldPlugins $oldPlugins)) {
+                    Write-CuraLog -LogPath $LogPath -Message "erro / plano de plugins inválido (roots sobrepostos); SketchUp $($ver.Year) preservado." -IsError
+                    $hadErrors = $true
+                    $snapshotVersions += [PSCustomObject]@{ year = $ver.Year; plugins_path = $ver.PluginsPath; plugins = $installedPluginsForVersion }
+                    continue
+                }
                 foreach ($vp in $verifiedPlugins) {
-                    # Só limpa os roots (snapshot antigo + manifest atual)
-                    # DESTE plugin, e só porque ele passou na verificação de
-                    # sha256 - imediatamente antes do Expand-Archive dele.
-                    # Plugin que falhou a verificação nunca chega aqui (não
-                    # está em $verifiedPlugins) e mantém a cópia antiga
-                    # intacta no disco.
-                    $pluginRootsToClean = @()
-                    if (($null -ne $oldSnapshot) -and ($null -ne $oldSnapshot.sketchup_versions)) {
-                        foreach ($oldVer in $oldSnapshot.sketchup_versions) {
-                            if ($oldVer.year -eq $ver.Year) {
-                                foreach ($p in $oldVer.plugins) {
-                                    if ($p.id -eq $vp.Plugin.id) {
-                                        foreach ($r in $p.roots) { $pluginRootsToClean += $r }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    foreach ($r in $vp.Plugin.roots) { $pluginRootsToClean += $r }
-                    $pluginRootsToClean = $pluginRootsToClean | Select-Object -Unique
-                    foreach ($name in $pluginRootsToClean) {
-                        Remove-CuraExact -ParentDir $ver.PluginsPath -Name $name -LogPath $LogPath
-                    }
-
-                    try {
-                        Expand-Archive -LiteralPath $vp.ZipPath -DestinationPath $ver.PluginsPath -Force
-                        Write-CuraLog -LogPath $LogPath -Message "instalado $($vp.Plugin.name) v$($vp.Plugin.version) em SketchUp $($ver.Year)"
-                        $installedPluginsForVersion += [PSCustomObject]@{
-                            id      = $vp.Plugin.id
-                            name    = $vp.Plugin.name
-                            version = $vp.Plugin.version
-                            roots   = $vp.Plugin.roots
-                        }
-                    } catch {
-                        Write-CuraLog -LogPath $LogPath -Message "erro / falha ao extrair $($vp.Plugin.name) em SketchUp $($ver.Year): $($_.Exception.Message)" -IsError
-                        $hadErrors = $true
-                    }
+                    $oldRoots = @($oldPlugins | Where-Object { $_.id -eq $vp.Plugin.id } | ForEach-Object { $_.roots })
+                    if (Install-CuraPluginTransaction -Stage $vp.StagePath -PluginsPath $ver.PluginsPath -Roots @($vp.Plugin.roots) -OldRoots $oldRoots -LogPath $LogPath) {
+                        $installedPluginsForVersion = @($installedPluginsForVersion | Where-Object { $_.id -ne $vp.Plugin.id })
+                        $installedPluginsForVersion += [PSCustomObject]@{ id = $vp.Plugin.id; name = $vp.Plugin.name; version = $vp.Plugin.version; roots = $vp.Plugin.roots }
+                        $successfulPluginInstalls += $vp
+                        Write-CuraLog -LogPath $LogPath -Message "instalado e verificado $($vp.Plugin.name) v$($vp.Plugin.version) em SketchUp $($ver.Year)"
+                    } else { $hadErrors = $true }
                 }
 
                 $snapshotVersions += [PSCustomObject]@{
@@ -1511,14 +1791,7 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wPa
             foreach ($oldVer in $oldSnapshot.sketchup_versions) {
                 if ($versions.Year -contains $oldVer.year) { continue }
                 if ([string]::IsNullOrEmpty($oldVer.plugins_path)) { continue }
-                $aindaEmDisco = @()
-                foreach ($p in $oldVer.plugins) {
-                    $presente = $true
-                    foreach ($r in $p.roots) {
-                        if (-not (Test-Path -LiteralPath (Join-Path $oldVer.plugins_path $r))) { $presente = $false }
-                    }
-                    if ($presente) { $aindaEmDisco += $p }
-                }
+                $aindaEmDisco = @(Get-CuraPresentPluginReceipts -Plugins $oldVer.plugins -PluginsPath $oldVer.plugins_path)
                 if ($aindaEmDisco.Count -gt 0) {
                     $snapshotVersions += [PSCustomObject]@{
                         year         = $oldVer.year
@@ -1558,13 +1831,9 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wPa
             photoshop          = $installedPhotoshop
             sketchup_templates = @($templateResult.receipts)
         }
-        # Escrita atômica: grava num .tmp e só substitui o snapshot real com
-        # Move-Item -Force por cima - evita installed.json meio escrito se o
-        # processo for interrompido no meio do Set-Content (queda de energia,
-        # kill da tarefa por timeout, etc).
-        $snapshotTmpPath = "$SnapshotPath.tmp"
-        $snapshot | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $snapshotTmpPath -Encoding UTF8
-        Move-Item -LiteralPath $snapshotTmpPath -Destination $SnapshotPath -Force
+        # O backup dos plugins só é liberado depois da troca atômica do recibo.
+        Save-CuraSnapshot -Snapshot $snapshot -SnapshotPath $SnapshotPath
+        Complete-CuraPluginTransactions
 
         # --- 10. Auto-update: (re)registra a tarefa agendada sempre que uma
         # rodada chega até aqui - interativa OU -Quiet. Register-ScheduledTask
@@ -1620,7 +1889,7 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wPa
         # lista a partir de $manifest.plugins faria o instalador afirmar que
         # instalou justamente o item que o download corrompeu.
         $pluginSummaryParts = @()
-        foreach ($vp in $verifiedPlugins) {
+        foreach ($vp in @($successfulPluginInstalls | Sort-Object { $_.Plugin.id } -Unique)) {
             $pluginSummaryParts += "$($vp.Plugin.name) v$($vp.Plugin.version)"
         }
         $verWord = if ($versions.Count -eq 1) { "versão" } else { "versões" }
@@ -1629,7 +1898,7 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wPa
             $msg = "nenhum plugin instalado (falha de integridade) em $($versions.Count) $verWord do SketchUp ($versionsList); $($installedFonts.Count) $fonteNoun."
         } else {
             $pluginSummary = $pluginSummaryParts -join ", "
-            $msg = "instalado: $pluginSummary em $($versions.Count) $verWord do SketchUp ($versionsList); $($installedFonts.Count) $fonteNoun."
+            $msg = "instalado e verificado: $pluginSummary. SketchUp detectado: $versionsList; $($installedFonts.Count) $fonteNoun."
         }
 
         if ($hadErrors) {
@@ -1678,6 +1947,7 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wPa
     Write-Host "log completo em: $LogPath"
     exit 2
 } finally {
+    try { Undo-CuraPluginTransactions -LogPath $LogPath } catch { Write-CuraLog -LogPath $LogPath -Message $_.Exception.Message -IsError }
     if ($script:CuraMutexOwned) {
         $script:CuraMutex.ReleaseMutex()
     }
