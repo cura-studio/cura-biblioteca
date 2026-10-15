@@ -30,6 +30,7 @@ class PrepareChannelsTests(unittest.TestCase):
         }
         if channel == "biblioteca":
             files[prep.UPDATER] = "# updater somente Biblioteca\n"
+            files[prep.UPDATER_UI] = "// interface somente Biblioteca\n"
         files.update(overrides or {})
         path = self.root / (channel + ".rbz")
         with zipfile.ZipFile(path, "w") as archive:
@@ -57,9 +58,10 @@ class PrepareChannelsTests(unittest.TestCase):
 
     def test_rejects_wrong_channel_and_own_warehouse_updater(self):
         library = self.package("biblioteca")
-        warehouse = self.package("warehouse", overrides={prep.UPDATER: "# forbidden"})
-        with self.assertRaisesRegex(ValueError, "updater próprio"):
-            self.prepare(library, warehouse)
+        for name in prep.LIBRARY_ONLY:
+            warehouse = self.package("warehouse", overrides={name: "# forbidden"})
+            with self.assertRaisesRegex(ValueError, "updater próprio"):
+                self.prepare(library, warehouse)
         with self.assertRaisesRegex(ValueError, "canal divergentes"):
             self.prepare(library, library)
 

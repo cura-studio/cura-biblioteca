@@ -15,6 +15,8 @@ from pathlib import Path, PurePosixPath
 PRODUCT = "cura-ferramentas"
 METADATA = "cura_ferramentas/distribution.json"
 UPDATER = "cura_ferramentas/core/updater.rb"
+UPDATER_UI = "cura_ferramentas/core/updater_ui.js"
+LIBRARY_ONLY = (UPDATER, UPDATER_UI)
 REPO = Path(__file__).resolve().parents[1]
 
 
@@ -47,10 +49,10 @@ def read_package(path, channel):
     ui_version = re.search(r"\bCURA_UI_VERSION\s*=\s*'([^']+)'", html).group(1)
     if version != ui_version:
         raise ValueError("Versão Ruby/UI divergente")
-    if channel == "biblioteca" and UPDATER not in files:
-        raise ValueError("Build Biblioteca sem updater")
+    if channel == "biblioteca" and any(name not in files for name in LIBRARY_ONLY):
+        raise ValueError("Build Biblioteca sem updater ou sua interface")
     if channel == "warehouse" and any(
-            PurePosixPath(name).stem == "updater" for name in files):
+            PurePosixPath(name).stem in ("updater", "updater_ui") for name in files):
         raise ValueError("Build Warehouse contém updater próprio")
     return version, files
 
@@ -71,7 +73,7 @@ def prepare(biblioteca, warehouse, source_commit, output):
     if version != other_version:
         raise ValueError("Canais têm versões diferentes")
     common_library = {name: data for name, data in library_files.items()
-                      if name not in (METADATA, UPDATER)}
+                      if name not in (METADATA,) + LIBRARY_ONLY}
     common_warehouse = {name: data for name, data in warehouse_files.items()
                         if name != METADATA}
     if common_library != common_warehouse:
