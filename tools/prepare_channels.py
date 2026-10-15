@@ -20,6 +20,25 @@ LIBRARY_ONLY = (UPDATER, UPDATER_UI)
 REPO = Path(__file__).resolve().parents[1]
 
 
+def read_distribution(payload):
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("Metadados do canal contêm chave duplicada")
+            result[key] = value
+        return result
+
+    metadata = json.loads(payload, object_pairs_hook=unique_object)
+    if (not isinstance(metadata, dict) or
+            set(metadata) != {"schema", "product", "channel"} or
+            type(metadata["schema"]) is not int or metadata["schema"] != 1 or
+            metadata["product"] != PRODUCT or
+            metadata["channel"] not in ("biblioteca", "warehouse")):
+        raise ValueError("Metadados do canal inválidos")
+    return metadata
+
+
 def read_package(path, channel):
     with zipfile.ZipFile(io.BytesIO(path) if isinstance(path, bytes) else path) as archive:
         files = {}
@@ -40,7 +59,7 @@ def read_package(path, channel):
             raise ValueError("RBZ corrompido")
     if any(name.endswith((".rbe", ".rbs", ".susig")) for name in files):
         raise ValueError("Preparação exige uploads abertos, anteriores à assinatura")
-    metadata = json.loads(files[METADATA].decode("utf-8"))
+    metadata = read_distribution(files[METADATA].decode("utf-8"))
     if metadata != {"schema": 1, "product": PRODUCT, "channel": channel}:
         raise ValueError("Metadados do canal divergentes: " + channel)
     ruby = files["cura_ferramentas.rb"].decode("utf-8")

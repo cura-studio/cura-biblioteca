@@ -29,7 +29,8 @@ jobs:
         # recusamos publicar por engano o ZIP aberto enviado ao Signing Portal.
         run: |
           python3 - <<'PY'
-          import json, zipfile
+          import zipfile
+          from tools.prepare_channels import read_distribution
           with zipfile.ZipFile('payload/cura-ferramentas.rbz') as archive:
               files = [n for n in archive.namelist() if not n.endswith('/')]
               assert archive.testzip() is None, 'RBZ corrompido'
@@ -38,7 +39,7 @@ jobs:
               assert any(n.endswith('.susig') for n in files), 'payload sem arquivo de assinatura'
               marker = 'cura_ferramentas/distribution.json'
               if marker in files:
-                  assert json.loads(archive.read(marker)) == {
+                  assert read_distribution(archive.read(marker)) == {
                       'schema': 1, 'product': 'cura-ferramentas', 'channel': 'biblioteca'
                   }, 'pacote de outro canal não pode virar payload da Biblioteca'
           PY

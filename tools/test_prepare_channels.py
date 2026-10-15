@@ -65,6 +65,18 @@ class PrepareChannelsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "canal divergentes"):
             self.prepare(library, library)
 
+    def test_rejects_ambiguous_distribution_metadata(self):
+        library = self.package("biblioteca")
+        for marker in [
+                '{"schema":true,"product":"cura-ferramentas","channel":"warehouse"}',
+                '{"schema":1.0,"product":"cura-ferramentas","channel":"warehouse"}',
+                '{"schema":1,"product":"cura-ferramentas","channel":"biblioteca","channel":"warehouse"}',
+                '{"schema":1,"product":"cura-ferramentas","channel":"warehouse","extra":0}']:
+            with self.subTest(marker=marker):
+                with self.assertRaises(ValueError):
+                    self.prepare(library, self.package("warehouse", overrides={prep.METADATA: marker}))
+        self.assertFalse((self.root / "private").exists())
+
     def test_rejects_version_ui_and_motor_differences(self):
         library = self.package("biblioteca")
         for overrides, version in [({}, "1.2.0"),
