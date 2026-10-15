@@ -29,13 +29,18 @@ jobs:
         # recusamos publicar por engano o ZIP aberto enviado ao Signing Portal.
         run: |
           python3 - <<'PY'
-          import zipfile
+          import json, zipfile
           with zipfile.ZipFile('payload/cura-ferramentas.rbz') as archive:
               files = [n for n in archive.namelist() if not n.endswith('/')]
               assert archive.testzip() is None, 'RBZ corrompido'
               assert [n for n in files if n.endswith('.rb')] == ['cura_ferramentas.rb'], 'Ruby interno aberto no payload'
               assert any(n.endswith('.rbe') for n in files), 'payload sem .rbe'
               assert any(n.endswith('.susig') for n in files), 'payload sem arquivo de assinatura'
+              marker = 'cura_ferramentas/distribution.json'
+              if marker in files:
+                  assert json.loads(archive.read(marker)) == {
+                      'schema': 1, 'product': 'cura-ferramentas', 'channel': 'biblioteca'
+                  }, 'pacote de outro canal não pode virar payload da Biblioteca'
           PY
 
       # gate de versao: os tres numeros que decidem se o parque recebe a
