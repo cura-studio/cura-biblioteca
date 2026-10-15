@@ -15,7 +15,7 @@
 
 #define MyAppName "Biblioteca CURA"
 #define MyAppPublisher "cura"
-#define MyAppURL "https://github.com/joaotegoni/cura-biblioteca"
+#define MyAppURL "https://github.com/cura-studio/cura-biblioteca"
 #define MyAppExeName "install.ps1"
 
 ; CI pode sobrescrever via `iscc /DMyAppVersion=1.2.3 windows\installer.iss`
@@ -87,7 +87,7 @@ Type: filesandordirs; Name: "{app}"
 
 [Code]
 const
-  CuraLatestPs1Url = 'https://github.com/joaotegoni/cura-biblioteca/releases/latest/download/install.ps1';
+  CuraLatestPs1Url = 'https://github.com/cura-studio/cura-biblioteca/releases/latest/download/install.ps1';
 
 var
   ResultCodeCura: Integer;

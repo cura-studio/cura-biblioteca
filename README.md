@@ -51,7 +51,7 @@ O aviso de beta aparece em quatro lugares e sai todo de uma vez quando a versão
 
 ### windows
 
-1. Baixe o instalador mais recente (`BibliotecaCURA-Setup.exe`) na [página de releases](https://github.com/joaotegoni/cura-biblioteca/releases/latest).
+1. Baixe o instalador mais recente (`BibliotecaCURA-Setup.exe`) na [página de releases](https://github.com/cura-studio/cura-biblioteca/releases/latest).
 2. Execute o arquivo baixado.
 3. O Windows SmartScreen provavelmente vai avisar que o programa é de um editor desconhecido (o instalador ainda não tem assinatura de código). Clique em **Mais informações** e depois em **Executar assim mesmo**.
 4. Siga o assistente. Não é preciso ser administrador — a instalação é só para o seu usuário.
@@ -63,7 +63,7 @@ O aviso de beta aparece em quatro lugares e sai todo de uma vez quando a versão
 Abra o Terminal e cole a linha abaixo:
 
 ```
-/bin/bash -c "$(curl -fsSL https://github.com/joaotegoni/cura-biblioteca/releases/latest/download/install.sh)"
+/bin/bash -c "$(curl -fsSL https://github.com/cura-studio/cura-biblioteca/releases/latest/download/install.sh)"
 ```
 
 O script baixa o manifest mais recente e instala os plugins e fontes em todas as versões do SketchUp encontradas no seu Mac.
@@ -75,7 +75,7 @@ O script baixa o manifest mais recente e instala os plugins e fontes em todas as
 **Mac:** cole a mesma linha do Terminal usada na instalação, acrescentando `-- --uninstall` no final:
 
 ```
-/bin/bash -c "$(curl -fsSL https://github.com/joaotegoni/cura-biblioteca/releases/latest/download/install.sh)" -- --uninstall
+/bin/bash -c "$(curl -fsSL https://github.com/cura-studio/cura-biblioteca/releases/latest/download/install.sh)" -- --uninstall
 ```
 
 Os dois modos listam exatamente o que vão remover antes de agir.
@@ -93,7 +93,7 @@ Pede confirmação e não roda em modo silencioso.
 **Mac:**
 
 ```
-/bin/bash -c "$(curl -fsSL https://github.com/joaotegoni/cura-biblioteca/releases/latest/download/install.sh)" -- --limpar
+/bin/bash -c "$(curl -fsSL https://github.com/cura-studio/cura-biblioteca/releases/latest/download/install.sh)" -- --limpar
 ```
 
 ## fontes
@@ -151,7 +151,7 @@ Todas as seis tags que já existem no repo terminam em `-rcN`: a memória muscul
 ### conferir depois de publicar (30 segundos, sempre)
 
 ```
-curl -sI https://github.com/joaotegoni/cura-biblioteca/releases/latest/download/BibliotecaCURA-Setup.exe | grep -i '^location'
+curl -sI https://github.com/cura-studio/cura-biblioteca/releases/latest/download/BibliotecaCURA-Setup.exe | grep -i '^location'
 ```
 
 Tem que voltar um **302** com `location` apontando pra `/releases/download/<tag-nova>/`. Se apontar pra uma tag antiga, a release saiu como prerelease e o parque não vai ver nada.

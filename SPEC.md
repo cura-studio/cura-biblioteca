@@ -31,7 +31,7 @@ Aluno
  └─ Mac: 1 linha Terminal: /bin/bash -c "$(curl -fsSL <RAW_SH_URL>)"
       └─ install.sh baixa manifest → executa
 
-GitHub repo joaotegoni/cura-biblioteca (público)
+GitHub repo cura-studio/cura-biblioteca (público)
  └─ Release "latest" assets:
     manifest.json, cura-ferramentas.rbz, fonts.zip, photoshop.zip, CuraUpscaler.jsx,
     CURA.skp, install.ps1, install.sh, BibliotecaCURA-Setup.exe
@@ -41,8 +41,8 @@ GitHub repo joaotegoni/cura-biblioteca (público)
 `CuraUpscaler.jsx` solto = link de **resgate manual** da página do curso; nenhum instalador busca ele. É byte-idêntico ao que está dentro do `photoshop.zip` — o gate do CI quebra a release se divergirem (link de resgate stale).
 
 URLs canônicas:
-- BASE = `https://github.com/joaotegoni/cura-biblioteca/releases/latest/download`
-- RAW_SH_URL = `https://raw.githubusercontent.com/joaotegoni/cura-biblioteca/main/scripts/install.sh`
+- BASE = `https://github.com/cura-studio/cura-biblioteca/releases/latest/download`
+- RAW_SH_URL = `https://raw.githubusercontent.com/cura-studio/cura-biblioteca/main/scripts/install.sh`
 - Override p/ teste local: env `CURA_BASE_URL` (aceita `file:///...` ou dir local). Ambos scripts respeitam.
 
 ## manifest.json (schema 1)
