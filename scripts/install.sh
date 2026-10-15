@@ -1184,6 +1184,7 @@ cleanup_plugins_dir() {
     for name in "${REMOVE_NAMES[@]}"; do
       is_safe_leaf_name "$name" || continue
       target="$plugins_dir/$name"
+      if is_ferramentas_root "$name" && ! ferramentas_install_authorized "$plugins_dir"; then continue; fi
       if [ -e "$target" ]; then
         # a lista "remove" do manifest ja carregou plugin de TERCEIRO (o
         # manifest 9.1.1 pedia TT_Lib2, que e dependencia de Solid Inspector2,
@@ -1210,6 +1211,119 @@ PLUGIN_ROLLBACK_FAILED=0
 
 is_cura_plugin_root() {
   is_safe_leaf_name "$1" && [[ "$1" =~ ^cura_[A-Za-z0-9_.-]+$ ]]
+}
+
+ferramentas_channel() {
+  local plugins_dir="$1" marker="$1/cura_ferramentas/distribution.json"
+  if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then printf 'absent'; return; fi
+  if [ -L "$plugins_dir/cura_ferramentas" ] || [ -L "$marker" ] || [ ! -f "$marker" ] || [ ! -r "$marker" ]; then printf 'invalid'; return; fi
+  # Contrato pequeno e fechado: exatamente schema/product/channel. O parser
+  # preserva whitespace dentro de strings e não depende de Python no macOS.
+  local parsed marker_size
+  marker_size="$(wc -c < "$marker")" || { printf 'invalid'; return; }
+  [ "$marker_size" -le 4096 ] || { printf 'invalid'; return; }
+  if ! parsed="$(awk '
+    { raw = raw $0 "\n" }
+    END {
+      quoted=0; escaped=0; compact=""
+      for (i=1; i<=length(raw); i++) {
+        c=substr(raw,i,1)
+        if (quoted) {
+          compact=compact c
+          if (escaped) escaped=0
+          else if (c=="\\") escaped=1
+          else if (c=="\"") quoted=0
+        } else if (c=="\"") { quoted=1; compact=compact c }
+        else if (c !~ /[ \t\r\n]/) compact=compact c
+      }
+      if (quoted || compact !~ /^\{.*\}$/) exit 1
+      n=split(substr(compact,2,length(compact)-2), fields, ",")
+      if (n!=3) exit 1
+      for (i=1; i<=n; i++) {
+        if (fields[i]=="\"schema\":1") { if (schema++) exit 1 }
+        else if (fields[i]=="\"product\":\"cura-ferramentas\"") { if (product++) exit 1 }
+        else if (fields[i]=="\"channel\":\"biblioteca\"") { if (channel++) exit 1; value="biblioteca" }
+        else if (fields[i]=="\"channel\":\"warehouse\"") { if (channel++) exit 1; value="warehouse" }
+        else exit 1
+      }
+      if (schema!=1 || product!=1 || channel!=1) exit 1
+      print value
+    }' "$marker" 2>/dev/null)"; then printf 'invalid'; return; fi
+  printf '%s' "$parsed"
+}
+
+is_ferramentas_root() {
+  case "$(printf '%s' "$1" | tr 'A-Z' 'a-z')" in cura_ferramentas|cura_ferramentas.rb) return 0 ;; *) return 1 ;; esac
+}
+
+ferramentas_path_directory() {
+  # Retorna por variável: nenhum pathname externo vira alvo por causa do marker.
+  FERRAMENTAS_PATH_DIR=""
+  local candidate="$1" parent
+  while [ "$candidate" != / ] && [ "$candidate" != . ]; do
+    parent="$(dirname "$candidate")"
+    if is_ferramentas_root "$(basename "$candidate")"; then
+      case "$parent" in */SketchUp/Plugins) FERRAMENTAS_PATH_DIR="$parent"; return 0 ;; esac
+    fi
+    candidate="$parent"
+  done
+  return 1
+}
+
+ferramentas_legacy_receipt() {
+  local plugins_dir="$1" si label path
+  for si in "${!SNAP_ITEM_PATHS[@]}"; do
+    path="${SNAP_ITEM_PATHS[$si]}"; label="${SNAP_ITEM_LABELS[$si]:-}"
+    [ "$(dirname "$path")" = "$plugins_dir" ] && is_ferramentas_root "$(basename "$path")" || continue
+    case "$label" in
+      'plugin cura | ferramentas v'*' (SketchUp '*')'|'legado: plugin cura | ferramentas v'*' (SketchUp '*')') return 0 ;;
+    esac
+  done
+  return 1
+}
+
+ferramentas_install_authorized() {
+  local plugins_dir="$1" channel
+  channel="$(ferramentas_channel "$plugins_dir")"
+  case "$channel" in
+    biblioteca) return 0 ;;
+    warehouse) log "canal Warehouse preservado em $plugins_dir; a Biblioteca não assume essa instalação"; return 1 ;;
+    invalid) log "distribution.json inválido, ilegível ou desconhecido em $plugins_dir; Ferramentas preservado sem assumir propriedade"; return 1 ;;
+    absent)
+      if [ ! -e "$plugins_dir/cura_ferramentas" ] && [ ! -L "$plugins_dir/cura_ferramentas" ] && [ ! -e "$plugins_dir/cura_ferramentas.rb" ] && [ ! -L "$plugins_dir/cura_ferramentas.rb" ]; then return 0; fi
+      if ferramentas_legacy_receipt "$plugins_dir"; then return 0; fi
+      log "Ferramentas sem distribution.json e sem recibo legado reconhecido em $plugins_dir; instalação preservada"
+      return 1 ;;
+    *) return 1 ;;
+  esac
+}
+
+filter_ferramentas_receipts() {
+  local mode="$1" si path label channel
+  local kept_paths=() kept_labels=()
+  CHANNEL_RECEIPTS_RETIRED=0
+  UNINSTALL_CHANNEL_BLOCKED=0
+  for si in "${!SNAP_ITEM_PATHS[@]}"; do
+    path="${SNAP_ITEM_PATHS[$si]}"; label="${SNAP_ITEM_LABELS[$si]:-item}"
+    if ferramentas_path_directory "$path"; then
+      channel="$(ferramentas_channel "$FERRAMENTAS_PATH_DIR")"
+      if [ "$channel" = warehouse ]; then
+        log "canal Warehouse preservado; recibo antigo da Biblioteca retirado: $path"
+        CHANNEL_RECEIPTS_RETIRED=1
+        continue
+      fi
+      if [ "$mode" = uninstall ] && ! ferramentas_install_authorized "$FERRAMENTAS_PATH_DIR"; then
+        UNINSTALL_CHANNEL_BLOCKED=1
+        log "desinstalação ignorou Ferramentas sem propriedade confirmada: $path"
+        continue
+      fi
+    fi
+    kept_paths+=("$path"); kept_labels+=("$label")
+  done
+  SNAP_ITEM_PATHS=(); SNAP_ITEM_LABELS=()
+  if [ "${#kept_paths[@]}" -gt 0 ]; then
+    SNAP_ITEM_PATHS=("${kept_paths[@]}"); SNAP_ITEM_LABELS=("${kept_labels[@]}")
+  fi
 }
 
 prepare_plugin_payload() {
@@ -1274,6 +1388,15 @@ rollback_plugin_transaction_impl() {
     root_count=$((root_count+1))
   done < "$txn/roots"
   [ "$root_count" -gt 0 ] || return 1
+  while IFS= read -r name; do
+    if is_ferramentas_root "$name"; then
+      case "$(ferramentas_channel "$plugins_dir")" in
+        absent|biblioteca) ;;
+        *) log "rollback de Ferramentas adiado: canal Warehouse ou metadata sem autorização em $plugins_dir; backup mantido em $txn"; return 1 ;;
+      esac
+      break
+    fi
+  done < "$txn/roots"
   if pgrep -x SketchUp >/dev/null 2>&1; then
     PLUGIN_ROLLBACK_FAILED=1
     err "SketchUp aberto durante rollback; backup preservado em $txn. recuperação adiada até fechar o programa."
@@ -1281,6 +1404,9 @@ rollback_plugin_transaction_impl() {
   fi
   while IFS= read -r name; do
     is_cura_plugin_root "$name" || return 1
+    if is_ferramentas_root "$name"; then
+      case "$(ferramentas_channel "$plugins_dir")" in absent|biblioteca) ;; *) return 1 ;; esac
+    fi
     rm -rf -- "$plugins_dir/$name" || { failed=1; continue; }
     if [ -e "$txn/reference/$name" ]; then
       cp -pR "$txn/reference/$name" "$plugins_dir/$name" || { failed=1; continue; }
@@ -1345,6 +1471,21 @@ recover_pending_plugin_transactions() {
     [ -f "$txn/plugins-path" ] && [ -f "$txn/roots" ] || return 1
     recorded="$(cat "$txn/plugins-path")" || return 1
     [ "$recorded" = "$plugins_dir" ] || return 1
+    local protected=0 recorded_root other_root=0
+    while IFS= read -r recorded_root; do
+      if is_ferramentas_root "$recorded_root"; then
+        case "$(ferramentas_channel "$plugins_dir")" in absent|biblioteca) ;; *) protected=1 ;; esac
+      else other_root=1
+      fi
+    done < "$txn/roots"
+    if [ "$protected" = 1 ]; then
+      if [ "$other_root" = 1 ]; then
+        err "journal legado mistura Ferramentas protegido com outro produto; recuperação pendente em $txn, sem nova atualização"
+        return 1
+      fi
+      log "journal antigo da Biblioteca preservado sem recuperar sobre outro canal em $plugins_dir"
+      continue
+    fi
     if [ -n "$snapshot_path" ] && [ -f "$txn/receipt.sha256" ] && [ -f "$snapshot_path" ]; then
       local actual_receipt_sha
       actual_receipt_sha="$(shasum -a 256 "$snapshot_path" | awk '{print $1}')"
@@ -1429,6 +1570,13 @@ install_plugin_transaction() {
       done < "$pending/roots"
     done
   fi
+  for name in "${roots[@]}"; do
+    if is_ferramentas_root "$name"; then
+      ferramentas_install_authorized "$plugins_dir" || return 1
+      case "$(ferramentas_channel "$stage")" in absent|biblioteca) ;; *) log 'payload Ferramentas de canal incompatível; Biblioteca não instala Warehouse'; return 1 ;; esac
+      break
+    fi
+  done
   # Um link em qualquer ancestral poderia redirecionar escrita para fora do perfil.
   check="$plugins_dir"
   while [ "$check" != / ]; do
@@ -1453,6 +1601,10 @@ install_plugin_transaction() {
         diff -qr "$stage/$name" "$txn/incoming/$name" >/dev/null || { rm -rf -- "$txn"; return 1; }
     fi
   done
+  # Rechecagem depois do staging: outro canal pode ter sido instalado nesse intervalo.
+  for name in "${roots[@]}"; do
+    if is_ferramentas_root "$name"; then ferramentas_install_authorized "$plugins_dir" || { rm -rf -- "$txn"; return 1; }; break; fi
+  done
   # Rechecagem por substituição, inclusive entre versões do SketchUp.
   if pgrep -x SketchUp >/dev/null 2>&1; then
     log "SketchUp aberto antes da substituição; plugin adiado"
@@ -1461,6 +1613,9 @@ install_plugin_transaction() {
   : > "$txn/ready" || { rm -rf -- "$txn"; return 1; }
   PLUGIN_TRANSACTIONS+=("$txn")
   for name in "${roots[@]}"; do
+    if is_ferramentas_root "$name"; then
+      case "$(ferramentas_channel "$plugins_dir")" in absent|biblioteca) ;; *) rollback_plugin_transaction "$txn"; return 1 ;; esac
+    fi
     if [ -e "$plugins_dir/$name" ]; then
       mv "$plugins_dir/$name" "$txn/saved/$name" || { rollback_plugin_transaction "$txn"; return 1; }
     fi
@@ -1669,9 +1824,11 @@ do_install() {
     # true" evita abortar sob set -e — SNAP_ITEM_PATHS fica vazio e o no-op
     # abaixo simplesmente nao dispara, seguindo como instalacao normal.
     read_snapshot || true
-    if [ -n "$BIBLIOTECA_VERSION" ] && [ "$SNAP_BIBLIOTECA_VERSION" = "$BIBLIOTECA_VERSION" ] && [ "${#SNAP_ITEM_PATHS[@]}" -gt 0 ]; then
+    filter_ferramentas_receipts install
+    if [ -n "$BIBLIOTECA_VERSION" ] && [ "$SNAP_BIBLIOTECA_VERSION" = "$BIBLIOTECA_VERSION" ]; then
       local noop=1 snap_path plugins_dir_c pi_c root_name_c old_ifs_c ps_no_snap=1
-      for snap_path in "${SNAP_ITEM_PATHS[@]}"; do
+      [ "$CHANNEL_RECEIPTS_RETIRED" = 0 ] || noop=0
+      for snap_path in ${SNAP_ITEM_PATHS[@]+"${SNAP_ITEM_PATHS[@]}"}; do
         case "$snap_path" in
           "$PHOTOSHOP_DIR"/*)
             # a pasta compartilhada so conta pro no-op quando o manifest BAIXADO
@@ -1699,6 +1856,10 @@ do_install() {
       if [ "$noop" = "1" ] && [ "${#VERSION_DIRS[@]}" -gt 0 ]; then
         for plugins_dir_c in "${VERSION_DIRS[@]}"; do
           for pi_c in "${!PLUGIN_IDS[@]}"; do
+            if [ "${PLUGIN_IDS[$pi_c]}" = cura-ferramentas ]; then
+              if [ "$(ferramentas_channel "$plugins_dir_c")" = warehouse ]; then continue; fi
+              ferramentas_install_authorized "$plugins_dir_c" || { noop=0; continue; }
+            fi
             old_ifs_c="$IFS"
             IFS=','
             for root_name_c in ${PLUGIN_ROOTS_CSV[$pi_c]}; do
@@ -1752,6 +1913,17 @@ do_install() {
       sha_expected="${PLUGIN_SHA256S[$i]}"
       dest="$TMP_DIR/payload/$file"
       PLUGIN_INSTALLED_COUNTS+=(0)
+      if [ "${PLUGIN_IDS[$i]}" = cura-ferramentas ]; then
+        local all_warehouse=1 candidate_dir
+        for candidate_dir in "${VERSION_DIRS[@]}"; do
+          if [ "$(ferramentas_channel "$candidate_dir")" != warehouse ]; then all_warehouse=0; break; fi
+        done
+        if [ "$all_warehouse" = 1 ]; then
+          log 'Ferramentas está no canal Warehouse em todas as versões detectadas; payload da Biblioteca dispensado'
+          PLUGIN_OK+=(0)
+          continue
+        fi
+      fi
 
       if ! is_safe_leaf_name "$file"; then
         PLUGIN_OK+=("0"); HAD_ERROR=1; continue
@@ -1801,6 +1973,13 @@ do_install() {
       fi
       for pi in "${!PLUGIN_IDS[@]}"; do
         if [ "${PLUGIN_OK[$pi]}" = "1" ]; then
+          if [ "${PLUGIN_IDS[$pi]}" = cura-ferramentas ]; then
+            if [ "$(ferramentas_channel "$plugins_dir_v")" = warehouse ]; then
+              log "canal Warehouse preservado em SketchUp $year_v; atualização pela Biblioteca ignorada"
+              continue
+            fi
+            if ! ferramentas_install_authorized "$plugins_dir_v"; then HAD_ERROR=1; continue; fi
+          fi
           local old_roots_csv
           old_roots_csv="$(old_plugin_roots_csv "$pi" "$plugins_dir_v")"
           if ! install_plugin_transaction "$TMP_DIR/plugin-stage-$pi" "$plugins_dir_v" "${PLUGIN_ROOTS_CSV[$pi]}" "$old_roots_csv"; then
@@ -2109,7 +2288,9 @@ do_install() {
   fi
 
   local msg
-  if [ -z "$ok_plugins_desc" ]; then
+  if [ -z "$ok_plugins_desc" ] && [ "$HAD_ERROR" = 0 ]; then
+    msg="nenhum plugin da Biblioteca substituído; instalações de outros canais preservadas. log: $LOG_PATH.${photoshop_note}"
+  elif [ -z "$ok_plugins_desc" ]; then
     msg="nenhum plugin instalado (falha de integridade) em ${#VERSION_YEARS[@]} ${ver_word} do SketchUp (${versions_desc})${fonts_suffix}. log: $LOG_PATH.${skipped_note}${photoshop_note}"
   else
     msg="instalado e verificado: ${ok_plugins_desc}. SketchUp detectado: ${versions_desc}${fonts_suffix}. log: $LOG_PATH.${skipped_note}${photoshop_note} abra o SketchUp e confira o menu Extensões. ${BETA_NOTE}"
@@ -2137,6 +2318,27 @@ do_install() {
 # ---------------------------------------------------------------------------
 # Desinstalacao — "explicando cada um"
 # ---------------------------------------------------------------------------
+unregister_updater() {
+  # CURA_BASE_URL de fixture nunca altera o launchd da máquina.
+  if [ -z "${CURA_BASE_URL:-}" ]; then
+    if launchctl unload "$UPDATER_PLIST" >/dev/null 2>&1; then :; fi
+  fi
+  if [ -e "$UPDATER_PLIST" ]; then
+    rm -f "$UPDATER_PLIST"
+    log "auto-update desregistrado"
+  fi
+}
+
+confirm_biblioteca_uninstall() {
+  printf 'confirma a remoção? (s/n): '
+  local resp=""
+  if ! read -r resp 2>/dev/null < /dev/tty; then
+    err "não foi possível confirmar (terminal indisponível). desinstalação cancelada por segurança. log: $LOG_PATH."
+    return 2
+  fi
+  case "$resp" in s|S|sim|Sim|SIM) return 0 ;; *) return 1 ;; esac
+}
+
 do_uninstall() {
   log_header
   banner
@@ -2166,8 +2368,14 @@ do_uninstall() {
     exit 0
   fi
 
+  filter_ferramentas_receipts uninstall
   if [ "${#SNAP_ITEM_PATHS[@]}" -eq 0 ]; then
-    say "nada instalado por este instalador (registro vazio em $SNAPSHOT_PATH)."
+    if [ "$UNINSTALL_CHANNEL_BLOCKED" = 1 ]; then
+      err "Ferramentas preservado por falta de propriedade confirmada; recibo mantido."
+      exit 2
+    fi
+    say "nenhum item removível da Biblioteca; instalações Warehouse foram preservadas."
+    unregister_updater
     rm -f "$SNAPSHOT_PATH"
     exit 0
   fi
@@ -2186,25 +2394,19 @@ do_uninstall() {
     printf '%s\n' "o cura upscaler é compartilhado — remover tira ele de todos os usuários deste computador."
   fi
 
-  printf 'confirma a remoção? (s/n): '
-  local resp=""
-  # ver nota em wait_sketchup_closed: "[ -r /dev/tty ]" sozinho nao basta,
-  # a tentativa real de leitura e que revela terminal indisponivel.
-  if ! read -r resp 2>/dev/null < /dev/tty; then
-    err "não foi possível confirmar (terminal indisponível). desinstalação cancelada por segurança. log: $LOG_PATH."
-    exit 2
-  fi
-
-  case "$resp" in
-    s | S | sim | Sim | SIM) ;;
-    *)
-      say "cancelado. nada foi removido."
-      exit 0
-      ;;
-  esac
+  local confirmation=0
+  confirm_biblioteca_uninstall || confirmation=$?
+  if [ "$confirmation" = 1 ]; then say "cancelado. nada foi removido."; exit 0; fi
+  [ "$confirmation" = 0 ] || exit 2
 
   local path
   for path in "${SNAP_ITEM_PATHS[@]}"; do
+    if ferramentas_path_directory "$path"; then
+      case "$(ferramentas_channel "$FERRAMENTAS_PATH_DIR")" in
+        warehouse) log "canal Warehouse preservado durante uninstall: $path"; continue ;;
+        invalid) UNINSTALL_CHANNEL_BLOCKED=1; log "metadata inválida; uninstall preservou $path"; continue ;;
+      esac
+    fi
     if is_safe_template_path "$path"; then
       if [ -e "$path" ] && ! recover_template_file "$path"; then
         err "não foi possível preservar o template $path; registro mantido para nova tentativa."
@@ -2228,17 +2430,12 @@ do_uninstall() {
   rmdir "$PHOTOSHOP_DIR" 2>/dev/null || true
   rmdir "$PHOTOSHOP_BASE_DIR" 2>/dev/null || true
 
-  # desregistra o auto-update junto: unload silencioso + remove o plist, antes
-  # de apagar o snapshot. em teste (CURA_BASE_URL) pula o launchctl real mas
-  # ainda remove o plist do HOME isolado.
-  if [ -z "${CURA_BASE_URL:-}" ]; then
-    if launchctl unload "$UPDATER_PLIST" >/dev/null 2>&1; then :; fi
-  fi
-  if [ -e "$UPDATER_PLIST" ]; then
-    rm -f "$UPDATER_PLIST"
-    log "auto-update desregistrado"
-  fi
+  unregister_updater
 
+  if [ "$UNINSTALL_CHANNEL_BLOCKED" = 1 ]; then
+    err "desinstalação parcial: Ferramentas com propriedade desconhecida foi preservado; recibo mantido."
+    exit 2
+  fi
   rm -f "$SNAPSHOT_PATH"
   printf '%sok /%s biblioteca cura desinstalada. log: %s\n' "$C_BOLD" "$C_RESET" "$LOG_PATH"
   log "resumo: ok / biblioteca cura desinstalada"

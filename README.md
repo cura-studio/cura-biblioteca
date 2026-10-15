@@ -68,6 +68,12 @@ Abra o Terminal e cole a linha abaixo:
 
 O script baixa o manifest mais recente e instala os plugins e fontes em todas as versões do SketchUp encontradas no seu Mac.
 
+## instalações pela Extension Warehouse
+
+O Ferramentas instalado pela Extension Warehouse é mantido pela Warehouse. A Biblioteca preserva seus arquivos, inclusive ao atualizar ou desinstalar uma Biblioteca antiga que ainda tenha recibos desses arquivos. Cada versão do SketchUp tem seu próprio canal: é possível usar Warehouse em uma e Biblioteca em outra. A identidade de acesso permanece fora da pasta de plugins.
+
+Essa proteção depende dos scripts novos. Computadores que ainda usam um instalador ou cache antigo precisam receber a versão atual pelo Latest ou executar o instalador atual uma vez, com o SketchUp fechado. A Biblioteca não converte canais automaticamente; metadados ilegíveis, inválidos ou desconhecidos geram aviso e preservação dos arquivos para conferência.
+
 ## desinstalar
 
 **Windows:** abra Configurações > Aplicativos (ou o Painel de Controle > Programas) e desinstale "Biblioteca CURA" como qualquer outro programa.
@@ -120,9 +126,13 @@ O campo `fonts.url` do manifest é **reservado**: existe pra espelhar o bloco de
 
 ## publicar uma versão
 
+Os uploads abertos de Biblioteca para o Signing Portal e de Warehouse devem permanecer **fora do checkout público**, inclusive antes de commit e push. `tools/prepare_channels.py --biblioteca <upload-biblioteca.rbz> --warehouse <upload-warehouse.rbz> --source-commit <sha-completo> --output <pasta-privada-nova>` confere canais, versão e igualdade dos motores, prepara cópias privadas e registra hashes no plano de entrega. Ele não assina, envia ou publica; a aprovação e a publicação da Warehouse continuam dependendo do portal e de seus comprovantes. Nunca coloque esses uploads abertos, código-fonte ou source archives nos assets da Biblioteca. Um gate posterior de CI não impede a exposição que já ocorreu em um commit público.
+
+Somente o **RBZ do canal Biblioteca devolvido protegido e validado pelo Signing Portal**, com o hash exato conferido, pode entrar em `payload/` e na release pública. Preserve os bytes retornados pelo portal: não reempacote nem substitua esse artefato pelo upload aberto ou pelo pacote Warehouse.
+
 Três números decidem se o aluno recebe a atualização — `biblioteca_version`, `plugins[].version` e a tag — e os três são editados **na mão**, em lugares diferentes. `make_manifest.py` não bumpa nenhum deles: só recalcula sha256 e confere.
 
-1. Copie o `.rbz` novo (e o `fonts.zip`, se mudou) para `payload/` e **versione**: `git status` não pode mostrar nada de `payload/` como untracked. O CI publica com `fail_on_unmatched_files: true` e falha se faltar asset.
+1. Copie exclusivamente o RBZ Biblioteca protegido e validado descrito acima (e o `fonts.zip`, se mudou) para `payload/` e **versione**: `git status` não pode mostrar nada de `payload/` como untracked. O CI publica com `fail_on_unmatched_files: true` e falha se faltar asset.
    - Mudou o cura upscaler? Rode `python3 tools/make_photoshop.py <fonte-jsx>`: ele regenera `payload/photoshop.zip` **e** `payload/CuraUpscaler.jsx` (link de resgate da página do curso) **juntos**, e os dois têm que ser versionados. Não regerar os dois é release quebrada na cara do aluno — o gate do CI compara o sha256 do `.jsx` solto com o de dentro do zip e reprova se divergirem.
 2. Edite `manifest.json` na mão:
    - `plugins[0].version` = a constante `VERSION` de dentro do `.rbz`. É o que o updater dentro do plugin compara: errado pra menos, o banner de atualização nunca aparece; pra mais, ele aparece pra sempre e reinstalar não limpa.

@@ -71,14 +71,23 @@ URLs canônicas:
 
 Regras:
 - `url: null` → download de `BASE/<file>`. URL absoluta → usa ela (futuro: endpoint autenticado assinatura — NÃO implementar auth agora, só suportar URL absoluta). Implementado só em `plugins[]` (install.sh `fetch_absolute_url`, install.ps1 `Get-CuraRemoteFile`). Em `fonts` **e em `photoshop`** o campo existe no schema mas é RESERVADO: nenhum dos dois instaladores lê — `fonts.zip` e `photoshop.zip` sempre vêm do asset da release.
-- `biblioteca_version` = versão da biblioteca inteira e ÚNICO critério de no-op do auto-update (install.sh e `Test-CuraUpToDate` no ps1 saem sem fazer nada se ela não mudou). Manual, e tem que casar com a tag sem o `v` — o CI recusa a release se divergir.
+- `biblioteca_version` = versão da biblioteca inteira. Divergência obriga atualização; igualdade só permite no-op se os arquivos e recibos gerenciados estiverem completos e a posse do canal estiver confirmada. Perfis Warehouse não exigem recibos de plugin da Biblioteca. Manual, tem que casar com a tag sem o `v` — o CI recusa a release se divergir.
 - `plugins[].version` = a constante `VERSION` de dentro do .rbz; é o que o updater in-plugin compara pra decidir o banner de atualização. Manual, conferido por `make_manifest.py` contra o zip.
 - `roots` = entradas raiz que o .rbz cria em Plugins/ → snapshot de desinstalação + limpeza de versão velha do próprio plugin antes de instalar. Conferido por `make_manifest.py` contra o zip.
 - `fonts: null` → pula fontes SEM erro. Hoje as fontes existem: `payload/fonts.zip` é gerado por `tools/make_fonts.py` (allowlist das 5 clássicas + `--google` inteiro) e traz um `names.json` com o nome de registro de cada arquivo pro Windows.
 - `photoshop: null` (ou bloco ausente, ou `{}`) → pula o cura upscaler SEM erro. Hoje o bloco existe: `payload/photoshop.zip` é gerado por `tools/make_photoshop.py`. Bloco presente mas quebrado (sem `file`, sha256 fora do formato) = AVISO e etapa pulada, nunca erro — é bônus.
-- `remove` = SÓ match exato de nome (arquivo ou pasta) dentro de cada `Plugins/`. NUNCA glob/wildcard. Hoje VAZIA: a lista das TT_* saiu porque tirava dependência de plugin pago do aluno (TT_Lib2 sustenta Solid Inspector², Vertex Tools, QuadFace Tools) numa execução silenciosa do auto-update. Nome novo aqui só entra com o mesmo cuidado do "limpar sketchup": o que sai do `Plugins/` vai pro porão de recuperação (`Documentos/cura-plugins-removidos/<data-hora>/SketchUp <ano>/`), nunca é apagado.
-- REGRA OPERACIONAL: renomeou um root de plugin, ou tirou um plugin do manifest? o nome ANTIGO entra na lista `remove` no MESMO release. A limpeza de upgrade só remove roots do plugin que vai ser reinstalado com sucesso (proteção contra download corrompido apagar cópia boa), então root antigo órfão só sai do disco via `remove`.
+- `remove` permanece no schema, mas não dispara remoção automática no fluxo normal. A transação de upgrade só substitui os roots do próprio plugin, depois de validar o pacote e a posse do canal. Plugins de terceiros permanecem intactos; o modo interativo `limpar` continua movendo terceiros para recuperação.
 - sha256 SEMPRE verificado pós-download. Falhou → aborta item com msg clara, não instala corrompido.
+
+## Posse por canal do Ferramentas
+
+O contrato do pacote é `cura_ferramentas/distribution.json`, exatamente com três chaves únicas: `{"schema":1,"product":"cura-ferramentas","channel":"biblioteca"}` ou `channel:"warehouse"`. A ordem das chaves e espaços fora das strings podem variar. Booleanos, `1.0`, chaves duplicadas ou extras, produtos/canais desconhecidos, links e metadados ilegíveis são inválidos. O canal pertence a esse `Plugins/` daquela versão do SketchUp; não é gravado no UUID nem no estado de acesso compartilhado fora de `Plugins/`.
+
+Instalação, no-op, rollback, recuperação de journal e desinstalação preservam roots Warehouse, mesmo com recibo antigo da Biblioteca. Esse recibo perde apenas as entradas dos roots Ferramentas que passaram à Warehouse; outros produtos, fontes e templates mantêm seu registro. Marcador ausente permite instalação nova quando não há roots Ferramentas; com roots existentes, só um recibo legado reconhecido autoriza o upgrade normal. Marcador inválido/ilegível/desconhecido ou legado sem recibo não autoriza assumir posse: preserva arquivos, registra motivo e sinaliza pendência. O pacote de entrada também não pode declarar Warehouse. A posse é revalidada depois do staging e antes de cada substituição/remoção. Não há conversão automática de canal nem validação fictícia de e-mail.
+
+Backups/journals antigos de Ferramentas que agora pertence à Warehouse são mantidos sem restaurar por cima desse canal. Se um mesmo journal incluir outro produto, a recuperação informa erro e impede novo update até resolver a pendência; não abandona silenciosamente a outra parte da transação. Na desinstalação só com recibos Warehouse, a Biblioteca retira seu próprio recibo e agendamento, preservando Ferramentas e identidade externa. O Windows atualiza atomicamente seu `install.ps1` cacheado numa execução normal do script novo, inclusive antes de no-op; o desinstalador Inno continua responsável por retirar cache/log. Máquinas que ainda não receberam os scripts novos pelo Latest ou execução manual mantêm o comportamento do instalador/cache antigo; este patch não alcança scripts já distribuídos sem atualização.
+
+As regressões `tools/test_distribution_mac.sh` e `tools/test_distribution_windows.ps1` exercitam perfis temporários com espaços, canal misto entre versões do SketchUp, instalação nova/legada, recibo antigo, metadados inválidos, troca de canal durante staging, rollback/journal e desinstalação/cache. São provas em filesystem isolado; PowerShell 7 no Mac não substitui teste nativo no Windows.
 
 ## Fluxo de instalação (idêntico nas 2 plataformas)
 
@@ -89,8 +98,8 @@ Regras:
    - Win: `%APPDATA%\SketchUp\SketchUp 20XX\SketchUp\Plugins`
    - Mac: `~/Library/Application Support/SketchUp 20XX/SketchUp/Plugins`
 5. Zero versão achada → aviso: "SketchUp não encontrado — instalando só as fontes; instale o SketchUp e rode este instalador de novo." Segue p/ fontes, exit 1.
-6. Por versão: limpeza — remove itens da lista `remove` + `roots` de instalação anterior (upgrade limpo). Loga cada remoção.
-7. Download payloads em dir temp (mktemp) → sha256 → unzip .rbz (rbz = zip) DENTRO de cada `Plugins/` (overwrite). Download 1×, instala N×.
+6. Por versão: confere canal e plano de roots, incluindo roots antigos do próprio plugin; preserva Warehouse e terceiros.
+7. Download 1× em diretório temporário → sha256 → validação ZIP → extração/staging completo → backup verificado fora de `Plugins/`, no mesmo filesystem → substituição dos roots autorizados. Falha mantém a cópia antiga ou restaura backup verificado; o recibo só confirma a instalação efetiva. Recheca SketchUp fechado antes da substituição e da restauração; se reabrir, mantém backup/journal e informa pendência.
 8. Fontes (se manifest tiver): unzip fonts.zip; instala .ttf/.otf/.ttc per-user:
    - Mac: copia p/ `~/Library/Fonts/`
    - Win: copia p/ `%LOCALAPPDATA%\Microsoft\Windows\Fonts\` (criar dir) + registra valor em `HKCU\Software\Microsoft\Windows NT\CurrentVersion\Fonts`: nome = "<basename> (TrueType)", dado = path completo. Sem admin.

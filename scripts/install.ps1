@@ -386,6 +386,10 @@ function Remove-CuraExact {
         Write-CuraLog -LogPath $LogPath -Message "aviso: nome de remoção rejeitado (path-traversal?): '$Name' - ignorado."
         return
     }
+    if ((Test-CuraFerramentasRoot $Name) -and (Get-CuraFerramentasChannel $ParentDir) -in @('warehouse','invalid')) {
+        Write-CuraLog -LogPath $LogPath -Message "canal protegido; remoção ignorada: $Name em $ParentDir"
+        return
+    }
     $target = Join-Path $ParentDir $Name
     if (Test-Path -LiteralPath $target) {
         try {
@@ -410,6 +414,99 @@ function Get-CuraOldSnapshot {
         }
     }
     return $null
+}
+
+function Get-CuraFerramentasChannel {
+    param([string]$PluginsPath)
+    $module = Join-Path $PluginsPath 'cura_ferramentas'
+    $marker = Join-Path $module 'distribution.json'
+    try { $markerItem = Get-Item -LiteralPath $marker -Force -ErrorAction Stop }
+    catch [System.Management.Automation.ItemNotFoundException] { return 'absent' }
+    catch { return 'invalid' }
+    try {
+        if ($markerItem.PSIsContainer -or $markerItem.Length -gt 4096) { return 'invalid' }
+        foreach ($path in @($module, $marker)) {
+            if (((Get-Item -LiteralPath $path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return 'invalid' }
+        }
+        $raw = [IO.File]::ReadAllText($marker)
+        $compact = [regex]::Replace($raw, '("(?:\\.|[^"\\])*")|[ \t\r\n]+', [Text.RegularExpressions.MatchEvaluator]{ param($match) if ($match.Groups[1].Success) { $match.Groups[1].Value } else { '' } })
+        if ($compact -cnotmatch '^\{.*\}$') { return 'invalid' }
+        $fields = $compact.Substring(1, $compact.Length - 2).Split(',')
+        if ($fields.Count -ne 3) { return 'invalid' }
+        $seen = @{}; $channel = ''
+        foreach ($field in $fields) {
+            if ($field -ceq '"schema":1') { $key = 'schema' }
+            elseif ($field -ceq '"product":"cura-ferramentas"') { $key = 'product' }
+            elseif ($field -cmatch '^"channel":"(biblioteca|warehouse)"$') { $key = 'channel'; $channel = $Matches[1] }
+            else { return 'invalid' }
+            if ($seen.ContainsKey($key)) { return 'invalid' }
+            $seen[$key] = $true
+        }
+        if ($seen.Count -ne 3 -or -not $channel) { return 'invalid' }
+        return $channel
+    } catch { return 'invalid' }
+}
+
+function Test-CuraFerramentasRoot {
+    param([string]$Name)
+    return ($Name -in @('cura_ferramentas', 'cura_ferramentas.rb'))
+}
+
+function Test-CuraLegacyFerramentasReceipt {
+    param($OldSnapshot, [string]$PluginsPath)
+    if ($null -eq $OldSnapshot) { return $false }
+    foreach ($version in @($OldSnapshot.sketchup_versions)) {
+        if ($version.plugins_path -ne $PluginsPath) { continue }
+        foreach ($plugin in @($version.plugins)) {
+            if ($plugin.id -ne 'cura-ferramentas') { continue }
+            if (@($plugin.roots | Where-Object { Test-CuraFerramentasRoot $_ }).Count -gt 0) { return $true }
+        }
+    }
+    return $false
+}
+
+function Test-CuraFerramentasInstallAuthorized {
+    param([string]$PluginsPath, [bool]$LegacyRecognized = $false, [string]$LogPath)
+    $channel = Get-CuraFerramentasChannel $PluginsPath
+    if ($channel -eq 'biblioteca') { return $true }
+    if ($channel -eq 'warehouse') { Write-CuraLog -LogPath $LogPath -Message "canal Warehouse preservado em $PluginsPath; a Biblioteca não assume essa instalação"; return $false }
+    if ($channel -eq 'invalid') { Write-CuraLog -LogPath $LogPath -Message "distribution.json inválido, ilegível ou desconhecido em $PluginsPath; Ferramentas preservado"; return $false }
+    $existing = (Test-Path -LiteralPath (Join-Path $PluginsPath 'cura_ferramentas')) -or (Test-Path -LiteralPath (Join-Path $PluginsPath 'cura_ferramentas.rb'))
+    if (-not $existing -or $LegacyRecognized) { return $true }
+    Write-CuraLog -LogPath $LogPath -Message "Ferramentas sem distribution.json e sem recibo legado reconhecido em $PluginsPath; instalação preservada"
+    return $false
+}
+
+function Remove-CuraWarehouseReceipts {
+    param($OldSnapshot, [string]$LogPath)
+    $script:ChannelReceiptsRetired = $false
+    if ($null -eq $OldSnapshot) { return }
+    foreach ($version in @($OldSnapshot.sketchup_versions)) {
+        if ((Get-CuraFerramentasChannel $version.plugins_path) -ne 'warehouse') { continue }
+        $plugins = @()
+        foreach ($plugin in @($version.plugins)) {
+            $remaining = @($plugin.roots | Where-Object { -not (Test-CuraFerramentasRoot $_) })
+            if ($remaining.Count -eq @($plugin.roots).Count) { $plugins += $plugin; continue }
+            $script:ChannelReceiptsRetired = $true
+            Write-CuraLog -LogPath $LogPath -Message "canal Warehouse preservado; recibo antigo da Biblioteca retirado: $($version.plugins_path)"
+            if ($remaining.Count) { $plugin.roots = $remaining; $plugins += $plugin }
+        }
+        $version.plugins = $plugins
+    }
+}
+
+function Update-CuraInstallerCache {
+    param([string]$SourcePath, [string]$AppDataDir, [string]$LogPath)
+    if (-not $SourcePath -or -not [IO.File]::Exists($SourcePath)) { return }
+    $destination = Join-Path $AppDataDir 'install.ps1'
+    if ([IO.Path]::GetFullPath($SourcePath) -eq [IO.Path]::GetFullPath($destination)) { return }
+    try {
+        $temporary = "$destination.channel-update.tmp"
+        [IO.File]::Copy($SourcePath, $temporary, $true)
+        if ([IO.File]::Exists($destination)) { [IO.File]::Replace($temporary, $destination, [NullString]::Value) }
+        else { [IO.File]::Move($temporary, $destination) }
+        Write-CuraLog -LogPath $LogPath -Message 'cache de desinstalação atualizado com a proteção de canais'
+    } catch { Write-CuraLog -LogPath $LogPath -Message 'aviso: não foi possível atualizar o cache de desinstalação; execute novamente o instalador mais recente antes de desinstalar' }
 }
 
 function Test-CuraPluginRoot {
@@ -461,6 +558,9 @@ function Undo-CuraPluginTransaction {
         throw "SketchUp aberto durante rollback; backup preservado em $($Transaction.Path); recuperação adiada até fechar o programa"
     }
     foreach ($root in $Transaction.Roots) { if (-not (Test-CuraPluginRoot $root)) { throw 'journal de rollback com root inválido' } }
+    if (@($Transaction.Roots | Where-Object { Test-CuraFerramentasRoot $_ }).Count -and (Get-CuraFerramentasChannel $Transaction.PluginsPath) -notin @('absent', 'biblioteca')) {
+        throw "rollback de Ferramentas preservado: canal Warehouse ou metadata sem autorização em $($Transaction.PluginsPath)"
+    }
     $check = Get-Item -LiteralPath $Transaction.PluginsPath -Force -ErrorAction Stop
     while ($null -ne $check) {
         if (($check.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'ancestral com link no rollback' }
@@ -475,6 +575,7 @@ function Undo-CuraPluginTransaction {
             if ((Test-Path -LiteralPath $reference) -and (-not (Test-Path -LiteralPath $saved)) -and (Test-Path -LiteralPath $target)) {
                 if ((Get-CuraPluginTreeSignature $target) -eq (Get-CuraPluginTreeSignature $reference)) { continue }
             }
+            if ((Test-CuraFerramentasRoot $root) -and (Get-CuraFerramentasChannel $Transaction.PluginsPath) -notin @('absent','biblioteca')) { throw 'canal alterado durante rollback; roots preservados' }
             if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Stop }
             if (Test-Path -LiteralPath $saved) {
                 Move-Item -LiteralPath $saved -Destination $target -ErrorAction Stop
@@ -548,6 +649,13 @@ function Restore-CuraPendingPluginTransactions {
         if (-not (Test-Path -LiteralPath $journal)) { continue }
         $transaction = Get-Content -LiteralPath $journal -Raw -Encoding UTF8 | ConvertFrom-Json
         if ($transaction.Path -ne $directory.FullName -or $transaction.PluginsPath -ne $PluginsPath) { throw 'journal de rollback fora do diretório esperado' }
+        if (@($transaction.Roots | Where-Object { Test-CuraFerramentasRoot $_ }).Count -and (Get-CuraFerramentasChannel $PluginsPath) -notin @('absent', 'biblioteca')) {
+            if (@($transaction.Roots | Where-Object { -not (Test-CuraFerramentasRoot $_) }).Count) {
+                throw "journal legado mistura Ferramentas protegido com outro produto; recuperação pendente em $($transaction.Path), sem nova atualização"
+            }
+            Write-CuraLog -LogPath $LogPath -Message "journal antigo da Biblioteca mantido sem recuperar sobre outro canal em $PluginsPath"
+            continue
+        }
         $receiptHashPath = Join-Path $directory.FullName 'receipt.sha256'
         if ($SnapshotPath -and (Test-Path -LiteralPath $SnapshotPath) -and (Test-Path -LiteralPath $receiptHashPath)) {
             $expected = [IO.File]::ReadAllText($receiptHashPath)
@@ -593,7 +701,7 @@ function Test-CuraPluginPlan {
 }
 
 function Install-CuraPluginTransaction {
-    param([string]$Stage, [string]$PluginsPath, [string[]]$Roots, [string[]]$OldRoots, [string]$LogPath)
+    param([string]$Stage, [string]$PluginsPath, [string[]]$Roots, [string[]]$OldRoots, [string]$LogPath, [bool]$LegacyRecognized = $false)
     $allRoots = @(@($Roots) + @($OldRoots) | Select-Object -Unique)
     $spellings = @{}
     foreach ($root in @($Roots) + @($OldRoots)) {
@@ -606,6 +714,10 @@ function Install-CuraPluginTransaction {
         foreach ($root in $allRoots) {
             if ($pending.Roots -contains $root) { throw "transação sobreposta recusada: $root" }
         }
+    }
+    if (@($allRoots | Where-Object { Test-CuraFerramentasRoot $_ }).Count) {
+        if (-not (Test-CuraFerramentasInstallAuthorized -PluginsPath $PluginsPath -LegacyRecognized $LegacyRecognized -LogPath $LogPath)) { return $false }
+        if ((Get-CuraFerramentasChannel $Stage) -notin @('absent', 'biblioteca')) { throw 'payload Ferramentas de canal incompatível; Biblioteca não instala Warehouse' }
     }
     $check = Get-Item -LiteralPath $PluginsPath -Force -ErrorAction Stop
     while ($null -ne $check) {
@@ -632,12 +744,14 @@ function Install-CuraPluginTransaction {
             Copy-Item -LiteralPath $source -Destination $incoming -Recurse -Force -ErrorAction Stop
             if ((Get-CuraPluginTreeSignature $source) -ne (Get-CuraPluginTreeSignature $incoming)) { throw "staging divergiu: $root" }
         }
+        if (@($allRoots | Where-Object { Test-CuraFerramentasRoot $_ }).Count -and -not (Test-CuraFerramentasInstallAuthorized -PluginsPath $PluginsPath -LegacyRecognized $LegacyRecognized -LogPath $LogPath)) { throw 'canal alterado durante staging; roots preservados' }
         if (Get-Process -Name 'SketchUp*' -ErrorAction SilentlyContinue) { throw 'SketchUp aberto antes da substituição; plugin adiado' }
         $transaction | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $txnPath 'transaction.json') -Encoding UTF8 -ErrorAction Stop
         $script:PluginTransactions += $transaction
         $mutating = $true
         foreach ($root in $allRoots) {
             $target = Join-Path $PluginsPath $root
+            if ((Test-CuraFerramentasRoot $root) -and (Get-CuraFerramentasChannel $PluginsPath) -notin @('absent','biblioteca')) { throw 'canal alterado durante substituição; roots preservados' }
             if (Test-Path -LiteralPath $target) { Move-Item -LiteralPath $target -Destination (Join-Path $txnPath "saved/$root") -ErrorAction Stop }
             if ($Roots -contains $root) {
                 Move-Item -LiteralPath (Join-Path $txnPath "incoming/$root") -Destination $target -ErrorAction Stop
@@ -849,13 +963,22 @@ function Test-CuraUpToDate {
     )
     if ($null -eq $OldSnapshot) { return $false }
     if ($OldSnapshot.biblioteca_version -ne $Manifest.biblioteca_version) { return $false }
+    if ($script:ChannelReceiptsRetired) { return $false }
 
     foreach ($ver in $DetectedVersions) {
         $snapVer = $null
         foreach ($sv in $OldSnapshot.sketchup_versions) {
             if ($sv.year -eq $ver.Year) { $snapVer = $sv; break }
         }
-        if ($null -eq $snapVer) { return $false }   # SketchUp novo -> precisa instalar
+        if ($null -eq $snapVer) {
+            # Um perfil exclusivamente Warehouse não precisa de recibo Biblioteca.
+            $needsManagedVersion = $false
+            foreach ($plugin in $Manifest.plugins) {
+                if ($plugin.id -ne 'cura-ferramentas' -or (Get-CuraFerramentasChannel $ver.PluginsPath) -ne 'warehouse') { $needsManagedVersion = $true; break }
+            }
+            if ($needsManagedVersion) { return $false }
+            continue
+        }
 
         # Autoritativo contra o MANIFEST atual, não contra o que o snapshot
         # registrou: todo root de todo plugin do manifest precisa existir de
@@ -864,6 +987,10 @@ function Test-CuraUpToDate {
         # snapshot só tivesse os plugins que ela registrou, o no-op passaria
         # mesmo faltando plugin em disco.
         foreach ($plugin in $Manifest.plugins) {
+            if ($plugin.id -eq 'cura-ferramentas') {
+                if ((Get-CuraFerramentasChannel $ver.PluginsPath) -eq 'warehouse') { continue }
+                if (-not (Test-CuraFerramentasInstallAuthorized -PluginsPath $ver.PluginsPath -LegacyRecognized (Test-CuraLegacyFerramentasReceipt $OldSnapshot $ver.PluginsPath) -LogPath $LogPath)) { return $false }
+            }
             foreach ($r in $plugin.roots) {
                 if (-not (Test-Path -LiteralPath (Join-Path $ver.PluginsPath $r))) { return $false }
             }
@@ -1040,6 +1167,8 @@ function Invoke-CuraUninstall {
     }
 
     Write-Host "itens que serão removidos:"
+    Remove-CuraWarehouseReceipts -OldSnapshot $snap -LogPath $LogPath
+    $channelBlocked = $false
     foreach ($ver in $snap.sketchup_versions) {
         foreach ($p in $ver.plugins) {
             Write-Host "  - plugin $($p.name) v$($p.version) (SketchUp $($ver.year))"
@@ -1089,7 +1218,16 @@ function Invoke-CuraUninstall {
             continue
         }
         foreach ($p in $ver.plugins) {
+            $ownsFerramentas = (Get-CuraFerramentasChannel $ver.plugins_path) -eq 'biblioteca' -or (Test-CuraLegacyFerramentasReceipt $snap $ver.plugins_path)
+            if (@($p.roots | Where-Object { Test-CuraFerramentasRoot $_ }).Count -and -not (Test-CuraFerramentasInstallAuthorized -PluginsPath $ver.plugins_path -LegacyRecognized $ownsFerramentas -LogPath $LogPath)) {
+                $channelBlocked = $true
+                continue
+            }
             foreach ($r in $p.roots) {
+                if (Test-CuraFerramentasRoot $r) {
+                    $now = Get-CuraFerramentasChannel $ver.plugins_path
+                    if ($now -in @('warehouse','invalid')) { $channelBlocked = $true; Write-CuraLog -LogPath $LogPath -Message "canal alterado; uninstall preservou $r"; continue }
+                }
                 Remove-CuraExact -ParentDir $ver.plugins_path -Name $r -LogPath $LogPath
             }
         }
@@ -1163,6 +1301,10 @@ function Invoke-CuraUninstall {
 
     if (-not (Remove-CuraTemplates -Receipts $snap.sketchup_templates -SketchUpRoot $sketchUpRootUninstall -LogPath $LogPath)) {
         Write-CuraLog -LogPath $LogPath -Message 'erro / desinstalação incompleta. snapshot preservado; feche programas e tente novamente.' -IsError
+        exit 2
+    }
+    if ($channelBlocked) {
+        Write-CuraLog -LogPath $LogPath -Message 'desinstalação parcial: Ferramentas sem propriedade confirmada preservado; recibo mantido' -IsError
         exit 2
     }
     Unregister-CuraUpdater -TaskName $script:UpdaterTaskName -LogPath $LogPath
@@ -1338,6 +1480,7 @@ try {
     New-Item -ItemType Directory -Path $TempDir -Force | Out-Null
 
     try {
+        Update-CuraInstallerCache -SourcePath $PSCommandPath -AppDataDir $AppDataDir -LogPath $LogPath
         # --- 3. Baixa manifest.json ---
         $manifestPath = Join-Path $TempDir "manifest.json"
         $ok = Get-CuraAsset -BaseUrl $BaseUrl -FileName "manifest.json" -OutFile $manifestPath -LogPath $LogPath
@@ -1356,6 +1499,7 @@ try {
         $manifest = $manifestRaw | ConvertFrom-Json
 
         $oldSnapshot = Get-CuraOldSnapshot -SnapshotPath $SnapshotPath
+        Remove-CuraWarehouseReceipts -OldSnapshot $oldSnapshot -LogPath $LogPath
         $hadErrors = $false
 
         # --- 4/5. Detecta versões do SketchUp ---
@@ -1402,6 +1546,10 @@ try {
             # --- 7a. Baixa e verifica cada payload de plugin uma única vez ---
             $verifiedPlugins = @()
             foreach ($plugin in $manifest.plugins) {
+                if ($plugin.id -eq 'cura-ferramentas' -and @($versions | Where-Object { (Get-CuraFerramentasChannel $_.PluginsPath) -ne 'warehouse' }).Count -eq 0) {
+                    Write-CuraLog -LogPath $LogPath -Message 'Ferramentas está no canal Warehouse em todas as versões detectadas; payload da Biblioteca dispensado'
+                    continue
+                }
                 if (-not (Test-CuraSafeLeafName $plugin.file)) { $hadErrors = $true; continue }
                 $destFile = Join-Path $TempDir $plugin.file
                 $ok = Get-CuraPluginPayload -Plugin $plugin -BaseUrl $BaseUrl -OutFile $destFile -LogPath $LogPath
@@ -1460,8 +1608,12 @@ try {
                     continue
                 }
                 foreach ($vp in $verifiedPlugins) {
+                    if ($vp.Plugin.id -eq 'cura-ferramentas' -and (Get-CuraFerramentasChannel $ver.PluginsPath) -eq 'warehouse') {
+                        Write-CuraLog -LogPath $LogPath -Message "canal Warehouse preservado em SketchUp $($ver.Year); atualização pela Biblioteca ignorada"
+                        continue
+                    }
                     $oldRoots = @($oldPlugins | Where-Object { $_.id -eq $vp.Plugin.id } | ForEach-Object { $_.roots })
-                    if (Install-CuraPluginTransaction -Stage $vp.StagePath -PluginsPath $ver.PluginsPath -Roots @($vp.Plugin.roots) -OldRoots $oldRoots -LogPath $LogPath) {
+                    if (Install-CuraPluginTransaction -Stage $vp.StagePath -PluginsPath $ver.PluginsPath -Roots @($vp.Plugin.roots) -OldRoots $oldRoots -LogPath $LogPath -LegacyRecognized (Test-CuraLegacyFerramentasReceipt $oldSnapshot $ver.PluginsPath)) {
                         $installedPluginsForVersion = @($installedPluginsForVersion | Where-Object { $_.id -ne $vp.Plugin.id })
                         $installedPluginsForVersion += [PSCustomObject]@{ id = $vp.Plugin.id; name = $vp.Plugin.name; version = $vp.Plugin.version; roots = $vp.Plugin.roots }
                         $successfulPluginInstalls += $vp
@@ -1894,7 +2046,9 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wPa
         }
         $verWord = if ($versions.Count -eq 1) { "versão" } else { "versões" }
         $versionsList = ($versions | ForEach-Object { $_.Year }) -join ", "
-        if ($pluginSummaryParts.Count -eq 0) {
+        if ($pluginSummaryParts.Count -eq 0 -and -not $hadErrors) {
+            $msg = "nenhum plugin da Biblioteca substituído; instalações de outros canais preservadas; $($installedFonts.Count) $fonteNoun."
+        } elseif ($pluginSummaryParts.Count -eq 0) {
             $msg = "nenhum plugin instalado (falha de integridade) em $($versions.Count) $verWord do SketchUp ($versionsList); $($installedFonts.Count) $fonteNoun."
         } else {
             $pluginSummary = $pluginSummaryParts -join ", "
