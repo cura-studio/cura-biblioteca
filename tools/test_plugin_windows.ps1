@@ -15,6 +15,8 @@ $base = [IO.Path]::GetTempPath()
 if (Test-Path '/private/tmp' -PathType Container) { $base = '/private/tmp' }
 $fixture = Join-Path $base ('cura-plugin-test-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $fixture | Out-Null
+# Windows PowerShell 5.1 resolves the enum before ZipFile.Open loads its dependencies.
+Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 function New-FixtureZip($Path, $Variant) {
     $zip = [IO.Compression.ZipFile]::Open($Path, [IO.Compression.ZipArchiveMode]::Create)
