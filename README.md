@@ -4,6 +4,15 @@
 
 A biblioteca cura reúne os plugins, fontes e template do método cura para SketchUp. Este instalador baixa sempre a versão mais recente diretamente do GitHub — não é preciso reinstalar manualmente a cada atualização; basta rodar o instalador de novo quando quiser atualizar (ele conserta a instalação existente).
 
+## atualização 10.3.1: reinstalação sem erro nas fontes
+
+No Windows, rodar o instalador de novo com as fontes da Biblioteca já
+instaladas terminava com erro de "arquivo em uso" nas fontes, embora elas não
+tivessem mudado. Agora o instalador reconhece a fonte idêntica, mantém a que já
+está no computador e conclui sem erro. A atualização automática roda o mesmo
+instalador e também deixa de repetir esse erro. Plugin, template, fontes e
+Photoshop seguem os mesmos arquivos da 10.3.0.
+
 ## atualização 10.3.0: Ferramentas 1.1.0
 
 A Biblioteca distribui o CURA Ferramentas 1.1.0, assinado e protegido pelo

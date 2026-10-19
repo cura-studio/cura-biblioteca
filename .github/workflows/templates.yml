@@ -9,6 +9,7 @@ on:
       - 'tools/test_template_*'
       - 'tools/test_plugin_*'
       - 'tools/test_distribution_*'
+      - 'tools/test_fonts_*'
       - 'tools/prepare_channels.py'
       - 'tools/test_prepare_channels.py'
       - 'tools/make_manifest.py'
@@ -21,6 +22,7 @@ on:
       - 'tools/test_template_*'
       - 'tools/test_plugin_*'
       - 'tools/test_distribution_*'
+      - 'tools/test_fonts_*'
       - 'tools/prepare_channels.py'
       - 'tools/test_prepare_channels.py'
       - 'tools/make_manifest.py'
@@ -42,6 +44,9 @@ jobs:
       - name: posse dos canais no Windows PowerShell 5.1
         shell: powershell
         run: ./tools/test_distribution_windows.ps1
+      - name: fontes já instaladas no Windows PowerShell 5.1
+        shell: powershell
+        run: ./tools/test_fonts_windows.ps1
   mac:
     runs-on: macos-latest
     steps:
