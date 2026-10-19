@@ -797,6 +797,21 @@ function Wait-CuraSketchUpClosed {
     }
 }
 
+function Copy-CuraFontFile {
+    # Fonte já instalada fica carregada na sessão do Windows, e Copy-Item por
+    # cima falha com "arquivo em uso" mesmo com bytes idênticos (reinstalação,
+    # upgrade e auto-update batiam nisso toda rodada). Mesmo SHA-256 no destino
+    # = nada a copiar. Hash diferente segue pro Copy-Item e, se travado, o erro
+    # sobe pro catch do passo 8 como antes. Devolve $true se copiou.
+    param([string]$Source, [string]$Destination)
+    if ((Test-Path -LiteralPath $Destination -PathType Leaf) -and
+        (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash -eq (Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash) {
+        return $false
+    }
+    Copy-Item -LiteralPath $Source -Destination $Destination -Force
+    return $true
+}
+
 function Get-CuraPhotoshopSpec {
     # Normaliza o bloco "photoshop" do manifest num unico lugar (o passo 8a e o
     # no-op precisam da MESMA leitura). Devolve $null quando o bloco esta
@@ -1751,12 +1766,16 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wPa
                                         $regName = "$([System.IO.Path]::GetFileNameWithoutExtension($f.Name)) $sufixo"
                                     }
                                     $destFontPath = Join-Path $winFontsDir $f.Name
-                                    Copy-Item -LiteralPath $f.FullName -Destination $destFontPath -Force
+                                    $fontCopied = Copy-CuraFontFile -Source $f.FullName -Destination $destFontPath
+                                    # Registro e AddFontResourceW também no caso
+                                    # idêntico: repõem valor de registro que tenha
+                                    # sumido; repetir na sessão só soma referência.
                                     New-ItemProperty -Path $script:FontsRegKey -Name $regName -Value $destFontPath -PropertyType String -Force | Out-Null
                                     if ($script:FontApiOk) {
                                         [Cura.FontApi]::AddFontResourceW($destFontPath) | Out-Null
                                     }
-                                    Write-CuraLog -LogPath $LogPath -Message "fonte instalada: $($f.Name)"
+                                    $fontMsg = if ($fontCopied) { "fonte instalada: $($f.Name)" } else { "fonte já instalada (idêntica, cópia pulada): $($f.Name)" }
+                                    Write-CuraLog -LogPath $LogPath -Message $fontMsg
                                     $installedFonts += [PSCustomObject]@{ file = $destFontPath; reg_name = $regName }
                                 } catch {
                                     # arquivo já instalado e travado por outro app
