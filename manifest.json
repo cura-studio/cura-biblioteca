@@ -9,7 +9,7 @@
       "version": "1.1.0",
       "file": "cura-ferramentas.rbz",
       "url": null,
-      "sha256": "c9434b889dd1d726897122afed8c72aef686b5578e4f57e7a721ebf299b60faa",
+      "sha256": "e911f1412040d4a12ebbd6ca523a60e08478ca0b7ba0725ad33ac5e783e04561",
       "roots": [
         "cura_ferramentas",
         "cura_ferramentas.rb"

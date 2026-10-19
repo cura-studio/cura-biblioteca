@@ -1,11 +1,15 @@
 {
-  "source_commit": "6af4e689b74a97b9c52bc2d76f88ffa02da15d24",
+  "source_commit": "7cd73f889d0bcc4f4ea158ee8cc35931ba4839bb",
   "version": "1.1.0",
   "biblioteca_version": "10.3.0",
-  "planned_candidate_tag": "v10.3.0-rc1",
-  "publication_authorized": false,
-  "signed_payload_sha256": "c9434b889dd1d726897122afed8c72aef686b5578e4f57e7a721ebf299b60faa",
+  "planned_candidate_tag": "v10.3.0",
+  "publication_authorized": true,
+  "signed_payload_sha256": "e911f1412040d4a12ebbd6ca523a60e08478ca0b7ba0725ad33ac5e783e04561",
   "free_expires_at": "2027-06-30T03:00:00Z",
-  "free_expires_label": "30/06/2027 00:00 Brasília",
-  "native_windows_tested": false
+  "free_expires_label": "30/06/2027 00:00 Bras\u00edlia",
+  "native_windows_tested": false,
+  "authorization_date": "2026-10-19",
+  "distribution_channel": "biblioteca",
+  "native_signature_validation": false,
+  "validation_note": "Windows report by user covered the prior signed candidate. Channel-aware scripts are gated on Windows PowerShell 5.1 CI; native tests refer to exact package evidence separately."
 }

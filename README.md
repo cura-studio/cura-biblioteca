@@ -4,48 +4,30 @@
 
 A biblioteca cura reúne os plugins, fontes e template do método cura para SketchUp. Este instalador baixa sempre a versão mais recente diretamente do GitHub — não é preciso reinstalar manualmente a cada atualização; basta rodar o instalador de novo quando quiser atualizar (ele conserta a instalação existente).
 
-## atualização 10.2.0: template do SketchUp
+## atualização 10.3.0: Ferramentas 1.1.0
 
-O instalador também coloca `CURA.skp` na pasta de templates de cada SketchUp
-detectado, do 2018 em diante, no Windows e no Mac. Não há uma lista fixa de
-anos: uma nova versão instalada recebe o template na próxima execução do
-atualizador da Biblioteca, com o SketchUp fechado.
-
-No SketchUp, escolha o CURA em **Meus templates**. O instalador não troca o
-template padrão nem altera suas preferências. Um arquivo diferente que já
-esteja no mesmo destino é preservado em backup antes da substituição; outros
-templates não são alterados.
-
-O arquivo é o `template-cura-42001` original, salvo no formato SketchUp 2018,
-sem alterações internas. As configurações antigas do V-Ray foram mantidas:
-**não houve conversão nem validação para V-Ray 7**. SketchUp anterior a 2018
-não recebe este arquivo. O plugin Ferramentas continua na versão 1.0.1.
-
-## ferramentas 1.0.1
-
-A linha 0.5 do CURA Ferramentas foi encerrada. A Biblioteca distribui somente
-a 1.0.1, com a correção de leitura de pixels da captura. Quem está na 0.5 pode
-atualizar diretamente para 1.0.1, sem instalar versões intermediárias.
+A Biblioteca distribui o CURA Ferramentas 1.1.0, assinado e protegido pelo
+portal oficial SketchUp. O painel reúne 18 ferramentas. A gratuidade termina
+em 30/06/2027 às 00:00 de Brasília. A ativação futura por e-mail depende de
+uma integração posterior com o backend CURA.
 
 O atualizador da Biblioteca, quando registrado e ativo, verifica no login e
 diariamente; se o SketchUp estiver aberto, adia para o próximo disparo. Quem
 instalou somente um RBZ antigo sem esse atualizador deve executar o instalador
 da Biblioteca uma vez. O botão de atualização dentro do plugin é uma alternativa
-e exige clique e reinício do SketchUp. Publicação não confirma atualização de
-cada computador; o rodapé do plugin deve mostrar 1.0.1.
+e exige clique e reinício do SketchUp. O rodapé do plugin deve mostrar 1.1.0.
+Publicação não confirma instalação em cada computador.
 
-## beta
+A atualização preserva instalações que pertencem à Extension Warehouse,
+inclusive em recuperação e desinstalação com recibos antigos. O canal
+Warehouse usa a revisão e a atualização nativas do SketchUp; sua publicação
+é uma etapa separada da release da Biblioteca.
 
-A biblioteca está em **beta**: o instalador é estável, mas o plugin `cura | ferramentas` ainda está em teste e recebe correções com frequência. Como o instalador se atualiza sozinho, quem instalar agora recebe cada correção automaticamente — não é preciso reinstalar.
-
-O aviso de beta aparece em quatro lugares e sai todo de uma vez quando a versão for promovida:
-
-| Onde | O quê |
-|---|---|
-| `scripts/install.sh` | variável `BETA_NOTE` |
-| `scripts/install.ps1` | linha `Write-Host` marcada com `# aviso de beta` |
-| `windows/installer.iss` | `WelcomeLabel2` e `FinishedLabel` |
-| `cura-ferramentas/src/cura_ferramentas.rb` | prefixo `VERSAO BETA` em `ex.description` |
+O template CURA.skp, as fontes e o Photoshop permanecem com os mesmos arquivos
+da Biblioteca 10.2.0. O template usa formato SketchUp 2018 e aparece em
+**Meus templates**. O instalador preserva o template padrão e mantém backup
+de arquivo diferente no mesmo destino. As configurações antigas de V-Ray
+não foram convertidas nem validadas para V-Ray 7.
 
 ## instalação
 
