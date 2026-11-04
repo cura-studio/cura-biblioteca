@@ -1,15 +1,15 @@
 {
-  "source_commit": "f7c5d3a7765ba16f49be49534142e65c0401ca98",
-  "version": "1.1.2",
-  "biblioteca_version": "10.3.2",
-  "planned_candidate_tag": "v10.3.2",
+  "source_commit": "03f92062335ea485d026b866c5ab8fda4ed14d05",
+  "version": "1.1.3",
+  "biblioteca_version": "10.3.3",
+  "planned_candidate_tag": "v10.3.3",
   "publication_authorized": true,
-  "signed_payload_sha256": "477889c68590c17c6c7d17252145140596647f1a9b2ef145b65c2d4bc584c5e5",
+  "signed_payload_sha256": "77de41fc8bc69ef90d469caefbec4b2b4b0dc57d9b8f3e7697f6637d79b4010f",
   "free_expires_at": "2027-06-30T03:00:00Z",
   "free_expires_label": "30/06/2027 00:00 Bras\u00edlia",
   "native_windows_tested": false,
   "authorization_date": "2026-11-04",
   "distribution_channel": "biblioteca",
   "native_signature_validation": false,
-  "validation_note": "Signed package checked against the open upload: same file list as 1.1.0, 35 .rbe + .susig, non-Ruby files identical, loader 1.1.2, channel biblioteca. Capture fix verified natively on SketchUp 2026.2 Mac (TSA) via hot-patch; signed package not installed natively."
+  "validation_note": "Signed package checked against the open upload: 35 .rbe + .susig, non-Ruby files identical, loader 1.1.3, channel biblioteca. Open 1.1.3 build smoke-tested natively on SketchUp 2026.2 Mac (8 drawing tools, mask/eraser live, exports 5001/4999/5000, reflexo generate); rubocop-sketchup: 0 offenses."
 }
