@@ -4,6 +4,18 @@
 
 A biblioteca cura reúne os plugins, fontes e template do método cura para SketchUp. Este instalador baixa sempre a versão mais recente diretamente do GitHub — não é preciso reinstalar manualmente a cada atualização; basta rodar o instalador de novo quando quiser atualizar (ele conserta a instalação existente).
 
+## atualização 10.3.2: Ferramentas 1.1.2
+
+A Biblioteca distribui o CURA Ferramentas 1.1.2, assinado e protegido pelo
+portal oficial SketchUp. A captura deixa de sair em preto e branco ou
+inclinada no Mac quando a largura não era múltipla de 4 (ex.: 5001, 2390,
+1754) e passa a respeitar o tamanho pedido sem 1 px a mais. O reflexo traz as
+correções da 1.1.1, que não chegou a ser distribuída: espelho apagado ou
+movido não pausa os outros, cenas com corte de seção e câmera de dois pontos
+geram reflexo, e a exportação de cenas atualiza o reflexo de cada cena. O
+rodapé do plugin deve mostrar 1.1.2. Template, fontes e Photoshop seguem os
+mesmos arquivos da 10.3.1.
+
 ## atualização 10.3.1: reinstalação sem erro nas fontes
 
 No Windows, rodar o instalador de novo com as fontes da Biblioteca já
