@@ -20,6 +20,7 @@ UPDATER_UI = "cura_ferramentas/core/updater_ui.js"
 LIBRARY_ONLY = (UPDATER, UPDATER_UI)
 REPO = Path(__file__).resolve().parents[1]
 SOURCE_REPO = "cura-studio/cura-ferramentas"
+SOURCE_BRANCH = "master"
 CANDIDATE = REPO / "candidate-release.json"
 
 
@@ -38,13 +39,20 @@ def check_source_published(source_commit, version, api=gh_api):
 
     Ferramentas 1.1.2 e 1.1.3 saíram em 04/11/2026 com fonte (f7c5d3a, 03f9206)
     que só existia numa máquina; a correção seguinte teve que partir da 1.1.1.
-    Exige o commit em SOURCE_REPO e a tag vX.Y.Z apontando para ele.
+    Exige o commit em SOURCE_REPO, contido na SOURCE_BRANCH, e a tag vX.Y.Z
+    apontando para ele.
     """
     if not re.fullmatch(r"[0-9a-f]{40}", source_commit or ""):
         raise ValueError("Informe o commit completo da fonte")
     if api(f"repos/{SOURCE_REPO}/commits/{source_commit}") is None:
         raise ValueError(f"commit {source_commit[:7]} não está em {SOURCE_REPO}; "
                          "faça push do freeze antes de assinar ou publicar")
+    # branch única (João, 16/11/2026): versão distribuída sai da master, não de
+    # branch de sessão. compare base...master: "ahead"/"identical" = contido.
+    compare = api(f"repos/{SOURCE_REPO}/compare/{source_commit}...{SOURCE_BRANCH}")
+    if compare is None or compare.get("status") not in ("ahead", "identical"):
+        raise ValueError(f"commit {source_commit[:7]} não está na {SOURCE_BRANCH} de {SOURCE_REPO}; "
+                         f"leve o freeze para a {SOURCE_BRANCH} antes de assinar ou publicar")
     tag = f"v{version}"
     ref = api(f"repos/{SOURCE_REPO}/git/ref/tags/{tag}")
     if ref is None:

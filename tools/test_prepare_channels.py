@@ -44,12 +44,16 @@ class PrepareChannelsTests(unittest.TestCase):
 
     # --- fonte publicada (caso 1.1.2/1.1.3: fonte só existia numa máquina) ---
 
-    def fake_api(self, commits=(), tags=None, annotated=None):
+    def fake_api(self, commits=(), tags=None, annotated=None, on_master=None):
         tags, annotated = tags or {}, annotated or {}
+        on_master = commits if on_master is None else on_master
         repo = "repos/" + prep.SOURCE_REPO
         def api(path):
             if path.startswith(repo + "/commits/"):
                 return {"sha": path.rsplit("/", 1)[1]} if path.rsplit("/", 1)[1] in commits else None
+            if path.startswith(repo + "/compare/"):
+                sha = path.rsplit("/", 1)[1].split("...")[0]
+                return {"status": "ahead" if sha in on_master else "diverged"}
             if path.startswith(repo + "/git/ref/tags/"):
                 return tags.get(path.rsplit("/", 1)[1])
             if path.startswith(repo + "/git/tags/"):
@@ -60,6 +64,12 @@ class PrepareChannelsTests(unittest.TestCase):
     def test_source_check_rejects_commit_missing_on_github(self):
         with self.assertRaisesRegex(ValueError, "push do freeze"):
             prep.check_source_published(self.commit, "1.1.0", self.fake_api())
+
+    def test_source_check_rejects_commit_only_on_session_branch(self):
+        tag = {"v1.1.0": {"object": {"type": "commit", "sha": self.commit}}}
+        with self.assertRaisesRegex(ValueError, "não está na master"):
+            prep.check_source_published(self.commit, "1.1.0",
+                                        self.fake_api([self.commit], tag, on_master=()))
 
     def test_source_check_rejects_missing_or_wrong_tag(self):
         with self.assertRaisesRegex(ValueError, "tag v1.1.0 não existe"):
