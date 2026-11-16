@@ -44,6 +44,25 @@ jobs:
                   }, 'pacote de outro canal não pode virar payload da Biblioteca'
           PY
 
+      # proveniência: o CI não acessa o repo privado da fonte, então só exige
+      # que o registro exista e bata com o payload. A conferência no GitHub é
+      # `python3 tools/prepare_channels.py --check-candidate`, local, antes da tag
+      # (1.1.2/1.1.3 saíram com fonte só numa worktree local).
+      - name: registro da fonte (candidate-release.json bate com o rbz)
+        run: |
+          python3 - <<'PY'
+          import json, re, zipfile
+          cand = json.load(open('candidate-release.json'))
+          with zipfile.ZipFile('payload/cura-ferramentas.rbz') as archive:
+              loader = archive.read('cura_ferramentas.rb').decode('utf-8')
+          rbz = re.search(r"VERSION\s*=\s*'([^']+)'", loader).group(1)
+          assert re.fullmatch(r'[0-9a-f]{40}', cand.get('source_commit') or ''), \
+              'candidate-release.json sem source_commit completo'
+          assert cand.get('version') == rbz, \
+              f"candidate-release.json registra {cand.get('version')}, rbz é {rbz}"
+          print('fonte registrada', cand['version'], cand['source_commit'][:7])
+          PY
+
       # gate de versao: os tres numeros que decidem se o parque recebe a
       # release sao editados A MAO em arquivos diferentes (tag, manifest,
       # VERSION dentro do rbz). Divergiu -> falha silenciosa em producao:

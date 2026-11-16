@@ -8,6 +8,7 @@ import json
 import re
 import shutil
 import stat
+import subprocess
 import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
@@ -18,6 +19,47 @@ UPDATER = "cura_ferramentas/core/updater.rb"
 UPDATER_UI = "cura_ferramentas/core/updater_ui.js"
 LIBRARY_ONLY = (UPDATER, UPDATER_UI)
 REPO = Path(__file__).resolve().parents[1]
+SOURCE_REPO = "cura-studio/cura-ferramentas"
+CANDIDATE = REPO / "candidate-release.json"
+
+
+def gh_api(path):
+    """GET autenticado pelo gh local; None quando o GitHub não tem o objeto."""
+    run = subprocess.run(["gh", "api", path], capture_output=True, text=True)
+    if run.returncode != 0:
+        if "HTTP 404" in run.stderr or "HTTP 422" in run.stderr:
+            return None
+        raise OSError("gh api falhou (" + path + "): " + run.stderr.strip())
+    return json.loads(run.stdout)
+
+
+def check_source_published(source_commit, version, api=gh_api):
+    """A fonte de toda versão distribuída precisa estar no GitHub antes da assinatura.
+
+    Ferramentas 1.1.2 e 1.1.3 saíram em 04/11/2026 com fonte (f7c5d3a, 03f9206)
+    que só existia numa máquina; a correção seguinte teve que partir da 1.1.1.
+    Exige o commit em SOURCE_REPO e a tag vX.Y.Z apontando para ele.
+    """
+    if not re.fullmatch(r"[0-9a-f]{40}", source_commit or ""):
+        raise ValueError("Informe o commit completo da fonte")
+    if api(f"repos/{SOURCE_REPO}/commits/{source_commit}") is None:
+        raise ValueError(f"commit {source_commit[:7]} não está em {SOURCE_REPO}; "
+                         "faça push do freeze antes de assinar ou publicar")
+    tag = f"v{version}"
+    ref = api(f"repos/{SOURCE_REPO}/git/ref/tags/{tag}")
+    if ref is None:
+        raise ValueError(f"tag {tag} não existe em {SOURCE_REPO}; crie e envie a tag no commit do freeze")
+    target = ref["object"]
+    if target["type"] == "tag":
+        target = api(f"repos/{SOURCE_REPO}/git/tags/{target['sha']}")["object"]
+    if target["sha"] != source_commit:
+        raise ValueError(f"tag {tag} aponta para {target['sha'][:7]}, não para o freeze {source_commit[:7]}")
+
+
+def check_candidate(path=CANDIDATE, api=gh_api):
+    candidate = json.loads(Path(path).read_text(encoding="utf-8"))
+    check_source_published(candidate.get("source_commit"), candidate.get("version"), api)
+    return candidate
 
 
 def read_distribution(payload):
@@ -76,7 +118,7 @@ def read_package(path, channel):
     return version, files
 
 
-def prepare(biblioteca, warehouse, source_commit, output):
+def prepare(biblioteca, warehouse, source_commit, output, verify_source=check_source_published):
     if not re.fullmatch(r"[0-9a-f]{40}", source_commit):
         raise ValueError("Informe o commit completo da fonte")
     output = Path(output).resolve()
@@ -97,6 +139,7 @@ def prepare(biblioteca, warehouse, source_commit, output):
                         if name != METADATA}
     if common_library != common_warehouse:
         raise ValueError("Motores ou recursos diferem entre os canais")
+    verify_source(source_commit, version)
     output.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".cura-channels-", dir=output.parent))
     try:
@@ -147,11 +190,24 @@ def prepare(biblioteca, warehouse, source_commit, output):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--biblioteca", type=Path, required=True)
-    parser.add_argument("--warehouse", type=Path, required=True)
-    parser.add_argument("--source-commit", required=True)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--check-candidate", action="store_true",
+                        help="só confere se a fonte de candidate-release.json está no GitHub")
+    parser.add_argument("--biblioteca", type=Path)
+    parser.add_argument("--warehouse", type=Path)
+    parser.add_argument("--source-commit")
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args()
+    if args.check_candidate:
+        try:
+            candidate = check_candidate()
+        except (ValueError, KeyError, OSError) as error:
+            parser.exit(2, "Fonte não publicada: " + str(error) + "\n")
+        print(f"Fonte {candidate['version']} ({candidate['source_commit'][:7]}) confere no GitHub")
+        return
+    missing = [name for name in ("biblioteca", "warehouse", "source_commit", "output")
+               if getattr(args, name) is None]
+    if missing:
+        parser.error("faltam: " + ", ".join("--" + name.replace("_", "-") for name in missing))
     try:
         result = prepare(args.biblioteca, args.warehouse, args.source_commit, args.output)
     except (ValueError, KeyError, AttributeError, OSError, zipfile.BadZipFile) as error:
