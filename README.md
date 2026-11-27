@@ -4,6 +4,26 @@
 
 A biblioteca cura reúne os plugins, fontes e template do método cura para SketchUp. Este instalador baixa sempre a versão mais recente diretamente do GitHub — não é preciso reinstalar manualmente a cada atualização; basta rodar o instalador de novo quando quiser atualizar (ele conserta a instalação existente).
 
+## atualização 10.4.0: Ferramentas 1.3.0
+
+A Biblioteca distribui o CURA Ferramentas 1.3.0, assinado e protegido pelo
+portal oficial SketchUp. Entra a ferramenta **limpar modelo**, na aba revisão:
+junta faces no mesmo plano, emenda arestas divididas, apaga arestas soltas,
+tira a cor das arestas e limpa o que não é usado, tudo ligado por padrão. As
+opções avançadas ficam desligadas e só rodam com o botão pressionado até
+encher: apagar geometria oculta, apagar faces duplicadas, mover arestas e
+faces para a tag padrão, unir materiais idênticos, reduzir texturas grandes e
+suavizar arestas por ângulo. A limpeza inteira vira um único passo no
+desfazer, e grupos bloqueados não são alterados.
+
+A correção de sólidos deixa de prender o SketchUp depois de inspecionar:
+fechar a janela, trocar de aba ou completar a correção solta a ferramenta. O
+loader passa a aceitar usuário do Windows com acento no nome, e a ordem da
+aba revisão ficou sólidos, modelo, texturas e Enscape. Caneta, borracha e
+espelho saem do painel por enquanto; o código continua no plugin. O rodapé do
+plugin deve mostrar 1.3.0. Template, fontes e Photoshop seguem os mesmos
+arquivos da 10.3.3.
+
 ## atualização 10.3.3: Ferramentas 1.1.3
 
 A Biblioteca distribui o CURA Ferramentas 1.1.3, assinado e protegido pelo
